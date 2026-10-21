@@ -2715,6 +2715,11 @@ impl AppWindow {
         }
     }
 
+    /// The lab's demo HUD must not outlive the pane.
+    pub(super) fn platform_leave_hud_lab(&mut self) {
+        self.platform.indicator.send(DictationIndicatorEvent::Reset);
+    }
+
     pub(super) fn apply_hud_lab(&self) {
         self.platform
             .indicator

@@ -433,15 +433,48 @@ Modes                                    // modes
 
 Selected mode                            // replaces Global, does not layer over it
   -> Corrections
-  -> OpenCode transformation             // optional provider-backed rewrite
+  -> AI rewriting                        // optional; OpenCode, Codex CLI, or Claude CLI
   -> Transformations                     // ordered text chain
   -> Paste or Send
 
 Stage fails -> Preserve its input        // failed chain discards partial results
 ```
 
+### AI Rewriting Providers
+
+```ts
+AI rewriting on -> Provider               // modes.rewrite-provider (per mode)
+├── OpenCode (default for saved settings) -> managed service, ranked catalog
+├── Codex  -> `codex exec --json --ephemeral --ignore-user-config --sandbox read-only`
+│   ├── `codex login status` != ChatGPT -> Refuse (API key or signed out)
+│   └── Tool item started -> Kill group, fall back
+└── Claude -> `claude -p --output-format stream-json --tools "" --setting-sources ""`
+    └── init apiKeySource != none -> Kill group before billing, fall back
+Every CLI run: direct exec, empty workspace, prompt on stdin, API-key env removed,
+  stderr never logged, deadline + Escape kill the process group
+Failure, timeout, empty output -> Corrected transcript      // modes.rewrite-fallback
+Focused app changed during a rewrite -> No paste; Paste Last holds the text
+```
+
+[rewrite_prompt.rs](../../src/rewrite_prompt.rs) builds one provider-neutral
+prompt: fixed cleanup rules, a destination style inferred locally from bundle
+ID, application name, Brave URL, or (browsers only) the window title's site
+suffix, then the mode's instructions and the tag-delimited transcript. The
+window title itself leaves the Mac only when the mode enables **Share window
+title** (default off). Switching a mode to Codex or Claude starts it on
+`gpt-6-luna` or `haiku` with a 10-second deadline.
+
+Checks: `cli_rewrite::tests` run fake CLIs for stdin/argv safety, Unicode and
+200k-word inputs, auth and API-key refusal, tool refusal, timeouts,
+cancellation, concurrency, and stderr redaction; `rewrite_prompt::tests` cover
+destination selection and injection-resistant blocks;
+`rewritten_text_never_pastes_into_an_application_that_took_focus` in
+[parakeet.rs](../../src/parakeet.rs) covers the focus guard. The ignored
+`live_cli_rewrite` probe exercises the installed, signed-in CLIs. No check
+proves a provider's terms or future CLI flag stability.
+
 Built-in text transformations run natively. Custom transformations require the
-managed Bun workspace, not Commands enabled. OpenCode rewriting sends documented
+managed Bun workspace, not Commands enabled. AI rewriting sends documented
 context to the configured provider; speech transcription stays local.
 
 The built-ins are Lowercase, SpongeBob case, and No trailing punctuation. The

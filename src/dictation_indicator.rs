@@ -34,10 +34,16 @@ unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
 }
 
-const WINDOW_WIDTH: f32 = 112.0;
+const WINDOW_WIDTH: f32 = 136.0;
 const WINDOW_HEIGHT: f32 = 64.0;
-const CAPSULE_WIDTH: f32 = 56.0;
-const CAPSULE_HEIGHT: f32 = 16.0;
+const CAPSULE_WIDTH: f32 = 76.0;
+const CAPSULE_HEIGHT: f32 = 24.0;
+/// The pill contracts around three working dots while a job is pending.
+const PROCESSING_WIDTH: f32 = 42.0;
+/// Recent loudness, newest first. Bars ripple outward from the center as
+/// each sample ages, so the HUD reads as a live voice waveform.
+const LEVEL_HISTORY: usize = 8;
+const LEVEL_SAMPLE_INTERVAL: f32 = 0.02;
 const TOP_OFFSET: f64 = 12.0;
 /// The capsule's gap above the Dock or the screen's bottom edge.
 const BOTTOM_OFFSET: f64 = 24.0;
@@ -579,10 +585,27 @@ struct Uniforms {
     sphere_outline: f32,
     completion: f32,
     recording_flash: f32,
-    _padding: f32,
+    /// Fraction of the way to the next history sample, for smooth ripples.
+    level_phase: f32,
+    levels: [f32; LEVEL_HISTORY],
 }
 
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 112);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 144);
+
+/// Speech attacks follow the newest level immediately; only the release is
+/// smoothed. A symmetric spring hides short syllables behind its slow attack.
+fn follow_meter(meter: &mut Spring, target: f32, dt: f32) {
+    if target >= meter.x {
+        meter.jump(target);
+    } else {
+        meter.step_to(target, crate::motion::presets::INSTANT, dt);
+    }
+}
+
+fn push_level(levels: &mut [f32; LEVEL_HISTORY], level: f32) {
+    levels.copy_within(0..LEVEL_HISTORY - 1, 1);
+    levels[0] = level.clamp(0.0, 1.0);
+}
 
 fn recording_flash(elapsed: Duration) -> f32 {
     2.0_f32.powf(-elapsed.as_secs_f32() / RECORDING_FLASH_HALF_LIFE.as_secs_f32())
@@ -622,6 +645,20 @@ struct MetalRenderer {
     processing: Spring,
     post_processing: Spring,
     tuning: HudTuning,
+    levels: [f32; LEVEL_HISTORY],
+    level_clock: f32,
+}
+
+/// Opaque `CGColorSpace`, typed so Objective-C sends carry the
+/// `^{CGColorSpace=}` encoding that debug builds verify.
+#[repr(C)]
+struct CGColorSpace {
+    _private: [u8; 0],
+}
+
+unsafe impl objc2::encode::RefEncode for CGColorSpace {
+    const ENCODING_REF: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGColorSpace", &[]));
 }
 
 impl MetalRenderer {
@@ -635,7 +672,10 @@ impl MetalRenderer {
             if !color_space.is_null() {
                 let any_layer = &*(layer.as_ref() as *const metal::MetalLayerRef)
                     .cast::<objc2::runtime::AnyObject>();
-                let _: () = objc2::msg_send![any_layer, setColorspace: color_space];
+                let _: () = objc2::msg_send![
+                    any_layer,
+                    setColorspace: color_space.cast::<CGColorSpace>()
+                ];
                 CGColorSpaceRelease(color_space);
             }
         }
@@ -702,6 +742,8 @@ impl MetalRenderer {
             processing: Spring::at(0.0),
             post_processing: Spring::at(0.0),
             tuning: HudTuning::default(),
+            levels: [0.0; LEVEL_HISTORY],
+            level_clock: 0.0,
         })
     }
 
@@ -744,6 +786,8 @@ impl MetalRenderer {
                     .jump(if reduce { 0.0 } else { HIDDEN_SOFTNESS });
                 self.processing.jump(0.0);
                 self.post_processing.jump(0.0);
+                self.levels = [0.0; LEVEL_HISTORY];
+                self.level_clock = 0.0;
             }
             DictationIndicatorEvent::PromotedToVoiceAction => {
                 self.editing = true;
@@ -884,7 +928,7 @@ impl MetalRenderer {
         if self.completion_pending
             && now.duration_since(self.phase_started) >= PROCESSING_MORPH_DURATION
         {
-            self.width.jump(CAPSULE_HEIGHT);
+            self.width.jump(PROCESSING_WIDTH);
             self.processing.jump(1.0);
             self.phase = Phase::Completed;
             self.phase_started = now;
@@ -911,7 +955,7 @@ impl MetalRenderer {
         }
         let target_width = match self.phase {
             Phase::Recording => CAPSULE_WIDTH,
-            Phase::Transcribing => CAPSULE_HEIGHT,
+            Phase::Transcribing => PROCESSING_WIDTH,
             Phase::Hidden | Phase::Completed | Phase::Cancelled | Phase::Failed => self.width.x,
         };
         let target_processing = match self.phase {
@@ -931,8 +975,6 @@ impl MetalRenderer {
             0.0
         };
 
-        let meter_average_spec = Spec::from_omega(22.0);
-        let meter_peak_spec = Spec::from_omega(26.0);
         let geometry_spec = Spec::from_omega(GEOMETRY_ANGULAR_FREQUENCY);
         let visibility_frequency = if visible {
             ENTRANCE_ANGULAR_FREQUENCY
@@ -941,9 +983,8 @@ impl MetalRenderer {
         };
         let visibility_spec = Spec::from_omega(visibility_frequency);
 
-        self.average
-            .step_to(self.target_average, meter_average_spec, dt);
-        self.peak.step_to(self.target_peak, meter_peak_spec, dt);
+        follow_meter(&mut self.average, self.target_average, dt);
+        follow_meter(&mut self.peak, self.target_peak, dt);
         let snap_before = std::env::var_os("HEX_PREVIEW_BEFORE").is_some();
         if reduce || snap_before {
             self.width.jump(target_width);
@@ -982,6 +1023,11 @@ impl MetalRenderer {
             );
         }
         self.target_peak *= 0.91_f32.powf(dt * 60.0);
+        self.level_clock += dt;
+        while self.level_clock >= LEVEL_SAMPLE_INTERVAL {
+            self.level_clock -= LEVEL_SAMPLE_INTERVAL;
+            push_level(&mut self.levels, self.average.x.max(self.peak.x * 0.6));
+        }
 
         let Some(drawable) = self.layer.next_drawable() else {
             return true;
@@ -1030,7 +1076,8 @@ impl MetalRenderer {
                 0.0
             },
             recording_flash: recording_flash_for(self.phase, self.editing, elapsed),
-            _padding: 0.0,
+            level_phase: (self.level_clock / LEVEL_SAMPLE_INTERVAL).clamp(0.0, 1.0),
+            levels: self.levels,
         };
         encoder.set_fragment_bytes(
             0,
@@ -1155,11 +1202,40 @@ mod tests {
 
     #[test]
     fn rust_uniform_layout_matches_metal() {
-        assert_eq!(std::mem::size_of::<Uniforms>(), 112);
+        assert_eq!(std::mem::size_of::<Uniforms>(), 144);
         assert_eq!(std::mem::align_of::<Uniforms>(), 8);
         assert_eq!(std::mem::offset_of!(Uniforms, sphere_outline), 92);
         assert_eq!(std::mem::offset_of!(Uniforms, recording_flash), 100);
-        assert_eq!(std::mem::offset_of!(Uniforms, _padding), 104);
+        assert_eq!(std::mem::offset_of!(Uniforms, level_phase), 104);
+        assert_eq!(std::mem::offset_of!(Uniforms, levels), 108);
+    }
+
+    #[test]
+    fn short_syllables_attack_immediately_and_release_without_lingering() {
+        for fps in [60.0, 120.0] {
+            let mut meter = Spring::at(0.0);
+            follow_meter(&mut meter, 0.8, 1.0 / fps);
+            assert_eq!(meter.x, 0.8, "a one-frame syllable must remain visible");
+            let mut previous = meter.x;
+            for _ in 0..(fps * 0.1) as usize {
+                follow_meter(&mut meter, 0.0, 1.0 / fps);
+                assert!((0.0..=previous).contains(&meter.x));
+                previous = meter.x;
+            }
+            assert!(meter.x < 0.02, "pauses must become visible within 100 ms");
+            follow_meter(&mut meter, 0.6, 1.0 / fps);
+            assert_eq!(meter.x, 0.6, "a new syllable interrupts the release");
+        }
+    }
+
+    #[test]
+    fn level_history_ripples_outward_newest_first() {
+        let mut levels = [0.0; LEVEL_HISTORY];
+        push_level(&mut levels, 0.3);
+        push_level(&mut levels, 2.0);
+        assert_eq!(levels[0], 1.0);
+        assert_eq!(levels[1], 0.3);
+        assert!(levels[2..].iter().all(|level| *level == 0.0));
     }
 
     #[test]
@@ -1175,9 +1251,9 @@ mod tests {
         let spec = Spec::from_omega(GEOMETRY_ANGULAR_FREQUENCY);
         let mut width = Spring::at(CAPSULE_WIDTH);
         for _ in 0..15 {
-            width.step_to(CAPSULE_HEIGHT, spec, 1.0 / 60.0);
+            width.step_to(PROCESSING_WIDTH, spec, 1.0 / 60.0);
         }
-        assert!(width.x < CAPSULE_HEIGHT + 0.7);
+        assert!(width.x < PROCESSING_WIDTH + 0.7);
         assert_eq!(PROCESSING_MORPH_DURATION, Duration::from_millis(250));
     }
 
@@ -1189,14 +1265,14 @@ mod tests {
         let mut previous_width = width.x;
 
         for _ in 0..15 {
-            width.step_to(CAPSULE_HEIGHT, spec, 1.0 / 60.0);
+            width.step_to(PROCESSING_WIDTH, spec, 1.0 / 60.0);
             height.step_to(CAPSULE_HEIGHT, spec, 1.0 / 60.0);
-            assert!((CAPSULE_HEIGHT..=previous_width).contains(&width.x));
+            assert!((PROCESSING_WIDTH..=previous_width).contains(&width.x));
             assert_eq!(height.x, CAPSULE_HEIGHT);
             previous_width = width.x;
         }
 
-        assert!(width.x < CAPSULE_HEIGHT + 0.7);
+        assert!(width.x < PROCESSING_WIDTH + 0.7);
     }
 
     #[test]

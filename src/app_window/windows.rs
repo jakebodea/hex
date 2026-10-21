@@ -245,6 +245,8 @@ impl AppWindow {
 
     pub(super) fn platform_select_pane(&mut self, _: Pane) {}
 
+    pub(super) fn platform_leave_hud_lab(&mut self) {}
+
     pub(super) fn render_platform_pane(
         &mut self,
         _: Pane,

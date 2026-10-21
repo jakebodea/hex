@@ -21,10 +21,11 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::{Deserialize, Serialize};
 
+pub use crate::app_settings::RewriteProvider;
 use crate::context::{ContextSelector, ContextSnapshot};
+use crate::rewrite_prompt::RewritePrompt;
 use crate::text_replacements::ReplacementSet;
 
-const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.";
 const VOICE_ACTION_PROTOCOL_PROMPT: &str = "You execute a one-off voice instruction. When selected text is provided, transform or use it as instructed. When no text is selected, generate the requested text. Return only the exact paste-ready result without an explanation, label, alternative, or Markdown fence.";
 const VOICE_ACTION_PROFILE: &str = "Voice Action";
 const MAX_OPENCODE_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -66,8 +67,12 @@ impl PostProcessingSettings {
 pub struct Profile {
     name: String,
     ai_enabled: bool,
+    provider: RewriteProvider,
     prompt: String,
     model: Option<Model>,
+    /// The model name a Codex or Claude CLI receives; `None` uses its default.
+    cli_model: Option<String>,
+    share_window_title: bool,
     deadline: Duration,
     replacements: ReplacementSet,
     transformations: Vec<String>,
@@ -78,8 +83,11 @@ impl Profile {
         Self {
             name: name.into(),
             ai_enabled: false,
+            provider: RewriteProvider::OpenCode,
             prompt: prompt.into(),
             model: None,
+            cli_model: None,
+            share_window_title: false,
             deadline: Duration::from_secs(30),
             replacements: ReplacementSet::default(),
             transformations: Vec::new(),
@@ -98,6 +106,21 @@ impl Profile {
 
     pub fn transformations(mut self, transformations: Vec<String>) -> Self {
         self.transformations = transformations;
+        self
+    }
+
+    /// Rewrites through a Codex or Claude CLI instead of OpenCode.
+    pub fn cli(mut self, provider: RewriteProvider, model: Option<&str>) -> Self {
+        self.provider = provider;
+        self.cli_model = model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned);
+        self
+    }
+
+    pub fn share_window_title(mut self, share: bool) -> Self {
+        self.share_window_title = share;
         self
     }
 
@@ -125,17 +148,22 @@ impl Profile {
 
     /// Builds a runtime profile from persisted settings. A malformed model key
     /// falls back to the default model rather than disabling the mode.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn configured(
         name: impl Into<String>,
         replacements: ReplacementSet,
         transformations: Vec<String>,
         settings: &PostProcessingSettings,
     ) -> Self {
-        let mut profile = Self::new(name, &settings.prompt)
+        let profile = Self::new(name, &settings.prompt)
             .ai_enabled(settings.enabled)
             .replacements(replacements)
-            .transformations(transformations);
+            .transformations(transformations)
+            .share_window_title(settings.share_window_title)
+            .deadline(Duration::from_secs(settings.deadline_seconds.max(1)));
+        if settings.provider != RewriteProvider::OpenCode {
+            return profile.cli(settings.provider, settings.model.as_deref());
+        }
+        let mut profile = profile;
         if let Some((provider, model)) = settings
             .model
             .as_deref()
@@ -150,7 +178,7 @@ impl Profile {
                 profile = profile.variant(variant);
             }
         }
-        profile.deadline(Duration::from_secs(settings.deadline_seconds.max(1)))
+        profile
     }
 }
 
@@ -308,19 +336,39 @@ impl Profiles {
                 transformations: profile.transformations.clone(),
             };
         }
-        let prompt = prompt(profile, &corrected, context);
-        let (text, observation) = generate_observed(
-            &prompt,
-            profile.model.as_ref(),
-            profile.deadline,
-            cancelled,
-            &profile.name,
-            Instant::now(),
+        let prompt = RewritePrompt::new(
+            &profile.prompt,
+            &corrected,
+            context,
+            profile.share_window_title,
         );
+        let (text, observation) = if profile.provider == RewriteProvider::OpenCode {
+            let (text, mut observation) = generate_observed(
+                &prompt.combined(),
+                profile.model.as_ref(),
+                profile.deadline,
+                cancelled,
+                &profile.name,
+                Instant::now(),
+            );
+            observation.provider = Some(profile.provider.label().into());
+            (text, observation)
+        } else {
+            crate::cli_rewrite::rewrite_observed(
+                profile.provider,
+                profile.cli_model.as_deref(),
+                &prompt,
+                profile.deadline,
+                cancelled,
+                &profile.name,
+            )
+        };
         if observation.fallback.is_none() {
             tracing::info!(
                 profile = profile.name,
+                provider = profile.provider.label(),
                 latency_ms = observation.latency_ms,
+                startup_ms = observation.startup_ms,
                 "dictation post-processing completed"
             );
         }
@@ -423,6 +471,8 @@ fn generate_observed(
         profile: profile_name.into(),
         latency_ms: started.elapsed().as_millis() as u64,
         fallback,
+        provider: None,
+        startup_ms: None,
     };
     (text, observation)
 }
@@ -702,7 +752,7 @@ pub fn opencode_installed() -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn is_executable(path: &std::path::Path) -> bool {
+pub(crate) fn is_executable(path: &std::path::Path) -> bool {
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
@@ -809,6 +859,8 @@ impl Processed {
                 profile: "Custom transformations".into(),
                 latency_ms: 0,
                 fallback: None,
+                provider: None,
+                startup_ms: None,
             });
         observation.latency_ms = observation
             .latency_ms
@@ -818,15 +870,6 @@ impl Processed {
             Err(error) => observation.fallback = Some(error),
         }
     }
-}
-
-fn prompt(profile: &Profile, transcript: &str, context: &ContextSnapshot) -> String {
-    let application = context.application.as_deref().unwrap_or("unknown");
-    let host = context.browser_host().unwrap_or("none");
-    format!(
-        "{PROTOCOL_PROMPT}\n\nProfile instructions:\n{}\n\nForeground application: {application}\nBrowser host: {host}\n\nRaw transcript:\n<transcript>\n{transcript}\n</transcript>",
-        profile.prompt
-    )
 }
 
 fn voice_action_prompt(
@@ -854,6 +897,8 @@ fn voice_action_failure(started: Instant, error: String) -> Processed {
             profile: VOICE_ACTION_PROFILE.into(),
             latency_ms: started.elapsed().as_millis() as u64,
             fallback: Some(error),
+            provider: None,
+            startup_ms: None,
         }),
         transformations: Vec::new(),
     }
@@ -1403,7 +1448,7 @@ fn run_command(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn terminate_process_group(child: &mut Child) {
+pub(crate) fn terminate_process_group(child: &mut Child) {
     kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
@@ -1453,37 +1498,52 @@ fn find_opencode_executable(
     home: Option<&Path>,
     current_directory: Option<&Path>,
 ) -> Option<PathBuf> {
+    find_cli_executable("opencode2", configured, path, home, current_directory)
+}
+
+/// Finds a CLI that a GUI launch cannot see on its minimal PATH: an explicit
+/// override, then PATH, then the usual per-user and Homebrew install places.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn find_cli_executable(
+    name: &str,
+    configured: Option<PathBuf>,
+    path: Option<&OsStr>,
+    home: Option<&Path>,
+    current_directory: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(configured) = configured {
         return Some(absolute_path(configured, current_directory));
     }
     let path_candidates = path
         .into_iter()
         .flat_map(std::env::split_paths)
-        .map(|directory| absolute_path(directory.join("opencode2"), current_directory));
+        .map(|directory| absolute_path(directory.join(name), current_directory));
     let home_candidates = home.into_iter().flat_map(|home| {
         [
-            home.join(".opencode/bin/opencode2"),
-            home.join(".vite-plus/bin/opencode2"),
-            home.join(".bun/bin/opencode2"),
-            home.join("Library/pnpm/opencode2"),
-            home.join("Library/pnpm/bin/opencode2"),
-            home.join(".yarn/bin/opencode2"),
-            home.join(".config/yarn/global/node_modules/.bin/opencode2"),
-            home.join(".npm-global/bin/opencode2"),
-            home.join(".local/bin/opencode2"),
-            home.join("bin/opencode2"),
-            home.join(".volta/bin/opencode2"),
-            home.join(".asdf/shims/opencode2"),
-            home.join(".local/share/mise/shims/opencode2"),
-            home.join(".nodenv/shims/opencode2"),
+            ".opencode/bin",
+            ".claude/local",
+            ".vite-plus/bin",
+            ".bun/bin",
+            "Library/pnpm",
+            "Library/pnpm/bin",
+            ".yarn/bin",
+            ".config/yarn/global/node_modules/.bin",
+            ".npm-global/bin",
+            ".local/bin",
+            "bin",
+            ".volta/bin",
+            ".asdf/shims",
+            ".local/share/mise/shims",
+            ".nodenv/shims",
         ]
+        .map(|directory| home.join(directory).join(name))
     });
     path_candidates
         .chain(home_candidates)
-        .chain(version_manager_candidates(home))
+        .chain(version_manager_candidates(name, home))
         .chain([
-            PathBuf::from("/opt/homebrew/bin/opencode2"),
-            PathBuf::from("/usr/local/bin/opencode2"),
+            Path::new("/opt/homebrew/bin").join(name),
+            Path::new("/usr/local/bin").join(name),
         ])
         .find(|path| is_executable(path))
 }
@@ -1499,24 +1559,21 @@ fn absolute_path(path: PathBuf, current_directory: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn version_manager_candidates(home: Option<&Path>) -> Vec<PathBuf> {
+fn version_manager_candidates(name: &str, home: Option<&Path>) -> Vec<PathBuf> {
     let Some(home) = home else {
         return Vec::new();
     };
     let roots = [
-        (home.join(".nvm/versions/node"), "bin/opencode2"),
+        (home.join(".nvm/versions/node"), "bin"),
         (
             home.join("Library/Application Support/fnm/node-versions"),
-            "installation/bin/opencode2",
+            "installation/bin",
         ),
         (
             home.join(".local/share/fnm/node-versions"),
-            "installation/bin/opencode2",
+            "installation/bin",
         ),
-        (
-            home.join(".fnm/node-versions"),
-            "installation/bin/opencode2",
-        ),
+        (home.join(".fnm/node-versions"), "installation/bin"),
     ];
     roots
         .into_iter()
@@ -1526,7 +1583,7 @@ fn version_manager_candidates(home: Option<&Path>) -> Vec<PathBuf> {
                 .flatten()
                 .flatten()
                 .take(64)
-                .map(move |entry| entry.path().join(suffix))
+                .map(move |entry| entry.path().join(suffix).join(name))
         })
         .collect()
 }
@@ -2070,6 +2127,7 @@ mod tests {
     fn context(application: &str, url: Option<&str>) -> ContextSnapshot {
         ContextSnapshot {
             application: Some(application.into()),
+            bundle_id: None,
             browser_url: url.map(|url| Url::parse(url).unwrap()),
             window_title: None,
             selected_text: None,
@@ -2490,14 +2548,15 @@ mod tests {
 
     #[test]
     fn prompt_contains_only_current_transcript_and_selected_context() {
-        let profile = Profile::new("default", "Rewrite freely.");
-        let prompt = prompt(
-            &profile,
+        let prompt = RewritePrompt::new(
+            "Rewrite freely.",
             "This is the current transcript.",
             &context("Slack", None),
-        );
+            false,
+        )
+        .combined();
         assert!(prompt.contains("Rewrite freely."));
-        assert!(prompt.contains("Foreground application: Slack"));
+        assert!(prompt.contains("Application: Slack"));
         assert!(prompt.contains("This is the current transcript."));
     }
 
@@ -2535,6 +2594,59 @@ mod tests {
 
         assert!(!profiles.select(&context("Slack", None)).ai_enabled);
         assert_eq!(profiles.select(&context("Zed", None)).name, "default");
+    }
+
+    #[test]
+    fn configured_cli_profiles_keep_their_model_and_title_opt_in() {
+        let settings = PostProcessingSettings {
+            enabled: true,
+            provider: RewriteProvider::Claude,
+            model: Some("haiku".into()),
+            share_window_title: true,
+            deadline_seconds: 8,
+            ..PostProcessingSettings::default()
+        };
+        let profile = Profile::configured("Chat", ReplacementSet::default(), Vec::new(), &settings);
+        assert_eq!(profile.provider, RewriteProvider::Claude);
+        assert_eq!(profile.cli_model.as_deref(), Some("haiku"));
+        assert!(profile.model.is_none());
+        assert!(profile.share_window_title);
+        assert_eq!(profile.deadline, Duration::from_secs(8));
+
+        let opencode = Profile::configured(
+            "Global",
+            ReplacementSet::default(),
+            Vec::new(),
+            &PostProcessingSettings {
+                model: Some("anthropic/claude-haiku-4-5".into()),
+                ..PostProcessingSettings::default()
+            },
+        );
+        assert_eq!(opencode.provider, RewriteProvider::OpenCode);
+        assert_eq!(opencode.model.unwrap().id, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn a_failed_cli_rewrite_pastes_the_corrected_transcript() {
+        let profile = Profile::new("Global", "")
+            .ai_enabled(true)
+            .cli(RewriteProvider::Codex, Some("gpt-6-luna"))
+            .replacements(ReplacementSet::new(&[
+                crate::text_replacements::TextReplacement {
+                    matched_phrase: "open code".into(),
+                    output: "OpenCode".into(),
+                },
+            ]));
+        // A cancelled job stops before any process starts.
+        let processed = Profiles::new(profile).process_cancellable(
+            "um use open code",
+            &context("Zed", None),
+            &AtomicBool::new(true),
+        );
+        assert_eq!(processed.text, "um use OpenCode");
+        let observation = processed.observation.unwrap();
+        assert_eq!(observation.provider.as_deref(), Some("Codex"));
+        assert!(observation.fallback.unwrap().contains("cancelled"));
     }
 
     #[test]

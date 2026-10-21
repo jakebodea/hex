@@ -670,26 +670,88 @@ pub struct DictationMode {
     pub post_processing: DictationPostProcessing,
 }
 
-/// Persisted OpenCode rewrite settings for one mode.
+/// Which rewriter a mode's AI rewriting uses. OpenCode stays the default so
+/// existing settings keep their behavior.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewriteProvider {
+    #[default]
+    #[serde(rename = "opencode")]
+    OpenCode,
+    /// The installed `codex` CLI with its ChatGPT sign-in.
+    Codex,
+    /// The installed `claude` CLI with its Claude subscription sign-in.
+    Claude,
+}
+
+impl RewriteProvider {
+    pub const ALL: [Self; 3] = [Self::OpenCode, Self::Codex, Self::Claude];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenCode => "OpenCode",
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+
+    /// The fast model a CLI provider starts with; OpenCode ranks its own.
+    pub fn recommended_model(self) -> Option<&'static str> {
+        match self {
+            Self::OpenCode => None,
+            Self::Codex => Some("gpt-6-luna"),
+            Self::Claude => Some("haiku"),
+        }
+    }
+}
+
+/// Persisted AI rewrite settings for one mode.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DictationPostProcessing {
     pub enabled: bool,
+    pub provider: RewriteProvider,
     pub prompt: String,
-    /// Optional `provider/model` key from the OpenCode catalog.
+    /// OpenCode: an optional `provider/model` catalog key. Codex and Claude:
+    /// the model name passed to the CLI; `None` uses the CLI default.
     pub model: Option<String>,
     pub variant: Option<String>,
     pub deadline_seconds: u64,
+    /// Sends the focused window title to the rewriter. Off by default because
+    /// titles can name documents, contacts, or email subjects.
+    pub share_window_title: bool,
 }
+
+impl DictationPostProcessing {
+    /// Switching providers drops the old model, whose name means nothing to
+    /// the new one, and starts a CLI provider on its fast default.
+    pub fn set_provider(&mut self, provider: RewriteProvider) {
+        if self.provider == provider {
+            return;
+        }
+        self.provider = provider;
+        self.model = provider.recommended_model().map(str::to_owned);
+        self.variant = None;
+        if provider != RewriteProvider::OpenCode && self.deadline_seconds > CLI_DEADLINE_SECONDS {
+            self.deadline_seconds = CLI_DEADLINE_SECONDS;
+        }
+    }
+}
+
+/// Dictation is interactive: a CLI rewrite slower than this falls back to the
+/// local transcript instead of holding the paste.
+pub const CLI_DEADLINE_SECONDS: u64 = 10;
 
 impl Default for DictationPostProcessing {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: RewriteProvider::OpenCode,
             prompt: "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.".into(),
             model: None,
             variant: None,
             deadline_seconds: 30,
+            share_window_title: false,
         }
     }
 }
@@ -1546,6 +1608,48 @@ mod tests {
                 .ends_with("Hex Meetings")
         );
         assert!(settings.text_replacements.is_empty());
+    }
+
+    #[test]
+    fn saved_rewrite_settings_keep_opencode_and_private_titles() {
+        let processing: DictationPostProcessing = serde_json::from_str(
+            r#"{"enabled":true,"prompt":"p","model":"anthropic/claude","deadline_seconds":30}"#,
+        )
+        .unwrap();
+        assert_eq!(processing.provider, RewriteProvider::OpenCode);
+        assert!(!processing.share_window_title);
+        assert_eq!(processing.model.as_deref(), Some("anthropic/claude"));
+
+        let encoded = serde_json::to_value(DictationPostProcessing {
+            provider: RewriteProvider::Codex,
+            ..DictationPostProcessing::default()
+        })
+        .unwrap();
+        assert_eq!(encoded["provider"], "codex");
+        let opencode = serde_json::to_value(RewriteProvider::OpenCode).unwrap();
+        assert_eq!(opencode, "opencode");
+    }
+
+    #[test]
+    fn switching_rewrite_provider_resets_the_model_and_bounds_cli_latency() {
+        let mut processing = DictationPostProcessing {
+            model: Some("anthropic/claude-sonnet-4".into()),
+            variant: Some("high".into()),
+            ..DictationPostProcessing::default()
+        };
+
+        processing.set_provider(RewriteProvider::Claude);
+        assert_eq!(processing.model.as_deref(), Some("haiku"));
+        assert_eq!(processing.variant, None);
+        assert_eq!(processing.deadline_seconds, CLI_DEADLINE_SECONDS);
+
+        processing.model = Some("sonnet".into());
+        processing.set_provider(RewriteProvider::Claude);
+        assert_eq!(processing.model.as_deref(), Some("sonnet"));
+
+        processing.set_provider(RewriteProvider::OpenCode);
+        assert_eq!(processing.model, None);
+        assert_eq!(processing.deadline_seconds, CLI_DEADLINE_SECONDS);
     }
 
     #[test]

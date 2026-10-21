@@ -512,6 +512,19 @@ so fullscreen and Space transitions can be checked without a ten-second deadline
 This renders a real window with deterministic state; it does not prove that
 actual capture caused that state.
 
+The personal dark waveform HUD follows rising microphone levels immediately and
+smooths only their release with the shared 100 ms Instant spring. Every bar is
+65% live level and 35% outward-moving history, sampled every 20 ms (140 ms across
+seven offsets). This keeps syllables and pauses visible without removing the
+ripple. `short_syllables_attack_immediately_and_release_without_lingering`
+checks one-frame attacks, interrupted release, and decay at 60/120 Hz. HUD Lab
+uses simulated meter levels; it is not live-microphone latency proof.
+Observed October 21, 2026: all 13 macOS HUD tests passed in release mode,
+including the attack/release regression. The native deterministic preview showed
+the dark capsule and white bars; the personal signed build was installed and
+relaunched, and its installed executable matched the staged signed bundle.
+No live microphone latency was measured.
+
 The macOS HUD is a click-through, nonactivating `NSPanel` with
 `CanJoinAllSpaces`, `CanJoinAllApplications`, and `FullScreenAuxiliary` collection
 behaviors. The cross-application flag explicitly allows the overlay to join

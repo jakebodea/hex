@@ -269,6 +269,10 @@ impl HistoryStore {
                 fallback: processing
                     .fallback
                     .map(|fallback| truncated(&fallback, MAX_FALLBACK_BYTES)),
+                provider: processing
+                    .provider
+                    .map(|provider| truncated(&provider, MAX_LABEL_BYTES)),
+                startup_ms: processing.startup_ms,
             }),
             audio_ms: draft.audio_ms,
             inference_ms: draft.inference_ms,
@@ -529,6 +533,8 @@ mod tests {
                 profile: "Messages".into(),
                 latency_ms: 120,
                 fallback: None,
+                provider: None,
+                startup_ms: None,
             }),
             audio_ms: 900,
             inference_ms: 80,

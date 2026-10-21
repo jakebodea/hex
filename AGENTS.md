@@ -73,6 +73,13 @@ substitute for source inspection or a second roadmap.
   registration and authenticated loopback HTTP through the system curl; request
   bodies and credentials use stdin, never argv or new temporary files. Windows
   sends the same requests through the `opencode2 api` CLI inside a job object.
+- `rewrite_prompt`: the provider-neutral dictation rewrite prompt: fixed
+  cleanup rules, locally inferred destination style, mode instructions, and
+  injection-resistant context/transcript blocks.
+- `cli_rewrite`: Codex and Claude Code CLI rewriting on their own subscription
+  sign-ins: direct exec in an empty workspace, prompt on stdin, API-key
+  variables removed, API-key sessions refused, streamed JSON events, bounded
+  deadline and cancellation, and the Settings install/sign-in status.
 - `parakeet`: the strict-Metal `transcribe.cpp` adapter plus the dictation
   worker that hands clips to the transcription engine and runs bounded,
   ordered processing, output, paste, last-result, and meeting-delta work.
@@ -378,8 +385,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   return only paste-ready text, and paste at the current focus. Failed, empty,
   cancelled, or timed-out actions paste nothing. Voice Action jobs share normal
   queueing and cancellation but never update the last dictation.
-- Mode processing is best-effort and ordered: corrections, optional OpenCode
-  rewriting, then selected transformations. A failed stage preserves its input;
+- Mode processing is best-effort and ordered: corrections, optional AI
+  rewriting (OpenCode, Codex CLI, or Claude CLI), then selected transformations.
+  CLI rewriting never reads credentials, never passes the transcript on argv,
+  and refuses rather than bills an API key. A rewritten job whose application
+  lost focus does not paste; Paste Last holds it. A failed stage preserves its input;
   the transformation chain is one stage, so failure discards its partial results.
   It applies to Paste and Send, but not Voice Action or meetings.
 - OpenCode availability checks stay off the UI thread. When the app finds the

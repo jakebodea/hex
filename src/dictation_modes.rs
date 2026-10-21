@@ -96,6 +96,8 @@ pub fn history_draft(
                 profile: processing.profile.clone(),
                 latency_ms: processing.latency_ms,
                 fallback: processing.fallback.clone(),
+                provider: processing.provider.clone(),
+                startup_ms: processing.startup_ms,
             }
         }),
         audio_ms,

@@ -512,6 +512,7 @@ fn run_output_worker(
             let event = finish_output(
                 job,
                 &mut |text, mode, commit| paster.paste(text, mode, commit),
+                &crate::context::frontmost_application_name,
                 &mut last_transcript,
                 &mut meeting_cursor,
                 history.as_ref(),
@@ -805,6 +806,7 @@ fn queue_error(error: TrySendError<impl Sized>) -> &'static str {
 fn finish_output(
     job: OutputJob,
     paste: &mut impl FnMut(&str, PasteMode, &dyn Fn() -> bool) -> Result<()>,
+    focused_application: &dyn Fn() -> Option<String>,
     last_transcript: &mut Option<String>,
     meeting_cursor: &mut MeetingPasteCursor,
     history: Option<&History>,
@@ -835,6 +837,18 @@ fn finish_output(
                     return Err("voice action was cancelled".into());
                 }
                 let paste_started = Instant::now();
+                if matches!(
+                    target,
+                    TranscriptionTarget::Paste | TranscriptionTarget::Send
+                ) && let Some(application) = focus_left_during_rewrite(&completed, focused_application)
+                {
+                    // Text shaped for one app must not land in another;
+                    // Paste Last still inserts it deliberately.
+                    *last_transcript = Some(completed.text.clone());
+                    return Err(format!(
+                        "{application} lost focus while rewriting; use Paste Last to insert the text"
+                    ));
+                }
                 if !completed.text.trim().is_empty() {
                     let commit = || control.begin_output();
                     match target {
@@ -867,6 +881,8 @@ fn finish_output(
                     queue_ms = completed.timings.queue_ms,
                     prepare_ms = completed.timings.prepare_ms,
                     inference_ms = completed.timings.inference_ms,
+                    processing_ms = completed.processing.as_ref().map(|p| p.latency_ms),
+                    rewrite_startup_ms = completed.processing.as_ref().and_then(|p| p.startup_ms),
                     paste_ms = paste_started.elapsed().as_millis(),
                     total_ms = completed.timings.total_started.elapsed().as_millis(),
                     "dictation pipeline completed"
@@ -904,6 +920,23 @@ fn finish_output(
             WorkerEvent::Pasted { kind, result }
         }
     }
+}
+
+/// The application a rewritten job was captured in, when a different
+/// application now has focus. Unknown focus never blocks a paste.
+fn focus_left_during_rewrite<'a>(
+    completed: &'a CompletedTranscript,
+    focused_application: &dyn Fn() -> Option<String>,
+) -> Option<&'a str> {
+    completed.processing.as_ref()?.provider.as_ref()?;
+    let expected = completed.application.as_deref()?;
+    let current = focused_application()?;
+    let still_focused = crate::context::ContextSnapshot {
+        application: Some(current),
+        ..Default::default()
+    }
+    .application_is(expected);
+    (!still_focused).then_some(expected)
 }
 
 /// Record one successfully pasted result. History failures must never fail
@@ -1288,6 +1321,8 @@ mod tests {
                         profile: "Voice Action".into(),
                         latency_ms: 0,
                         fallback: Some("fixture generation failed".into()),
+                        provider: None,
+                        startup_ms: None,
                     }),
                     transformations: Vec::new(),
                 }
@@ -1565,6 +1600,74 @@ mod tests {
     }
 
     #[test]
+    fn rewritten_text_never_pastes_into_an_application_that_took_focus() {
+        let rewritten = |application: Option<&str>, provider: Option<&str>| CompletedTranscript {
+            text: "Rewritten for Slack.".into(),
+            raw: "rewritten for slack".into(),
+            application: application.map(str::to_owned),
+            timings: JobTimings {
+                total_started: Instant::now(),
+                queue_ms: 0,
+                audio_ms: 1_000,
+                prepare_ms: 0,
+                inference_ms: 0,
+            },
+            processing: Some(ProcessingObservation {
+                profile: "Slack".into(),
+                latency_ms: 1_500,
+                fallback: None,
+                provider: provider.map(str::to_owned),
+                startup_ms: Some(200),
+            }),
+        };
+        let finish = |completed: CompletedTranscript, focused: Option<&'static str>| {
+            let mut pasted = Vec::new();
+            let mut last_transcript = Some("previous".to_owned());
+            let event = finish_output(
+                OutputJob::Completed {
+                    job_id: DictationJobId(0),
+                    control: Arc::new(JobControl::default()),
+                    target: TranscriptionTarget::Paste,
+                    result: Box::new(Ok(completed)),
+                },
+                &mut |text, _, commit| {
+                    assert!(commit());
+                    pasted.push(text.to_owned());
+                    Ok(())
+                },
+                &move || focused.map(str::to_owned),
+                &mut last_transcript,
+                &mut MeetingPasteCursor::default(),
+                None,
+            );
+            (event, pasted, last_transcript)
+        };
+
+        let (event, pasted, last) = finish(rewritten(Some("Slack"), Some("Claude")), Some("Mail"));
+        assert!(pasted.is_empty());
+        assert!(matches!(
+            event,
+            WorkerEvent::Completed { result: Err(ref error), .. } if error.contains("Slack lost focus")
+        ));
+        assert_eq!(last.as_deref(), Some("Rewritten for Slack."));
+
+        for (completed, focused) in [
+            (rewritten(Some("Slack"), Some("Claude")), Some("slack")),
+            (rewritten(Some("Slack"), Some("Codex")), None),
+            (rewritten(None, Some("Codex")), Some("Mail")),
+            // Transformations alone are local and immediate.
+            (rewritten(Some("Slack"), None), Some("Mail")),
+        ] {
+            let (event, pasted, _) = finish(completed, focused);
+            assert!(matches!(
+                event,
+                WorkerEvent::Completed { result: Ok(_), .. }
+            ));
+            assert_eq!(pasted, ["Rewritten for Slack."]);
+        }
+    }
+
+    #[test]
     fn output_stays_cancellable_through_preparation_but_not_after_mutation() {
         use std::cell::{Cell, RefCell};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1661,6 +1764,7 @@ mod tests {
                         }
                         Ok(())
                     },
+                    &|| None,
                     &mut last_transcript,
                     &mut MeetingPasteCursor::default(),
                     Some(&history),

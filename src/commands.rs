@@ -1249,6 +1249,7 @@ mod tests {
         ));
         let x = ContextSnapshot {
             application: Some("Brave Browser".into()),
+            bundle_id: None,
             browser_url: Some(url::Url::parse("https://x.com/home").unwrap()),
             window_title: None,
             selected_text: None,
@@ -1277,6 +1278,7 @@ mod tests {
         ));
         let slack = ContextSnapshot {
             application: Some("Slack".into()),
+            bundle_id: None,
             browser_url: None,
             window_title: None,
             selected_text: None,
@@ -1324,6 +1326,7 @@ mod tests {
 
         let slack = ContextSnapshot {
             application: Some("Slack".into()),
+            bundle_id: None,
             browser_url: None,
             window_title: None,
             selected_text: None,

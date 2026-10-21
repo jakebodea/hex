@@ -43,6 +43,12 @@ pub fn opencode_workspace() -> Result<PathBuf> {
     Ok(support_dir()?.join("opencode"))
 }
 
+/// The empty working directory Codex and Claude rewrites run in, so neither
+/// CLI discovers a repository, project instructions, or user files.
+pub fn cli_rewrite_workspace() -> Result<PathBuf> {
+    Ok(support_dir()?.join("cli-rewrite"))
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn local_api_discovery_file() -> Result<PathBuf> {
     Ok(support_dir()?.join("local-api.json"))
