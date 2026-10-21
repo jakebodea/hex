@@ -73,6 +73,9 @@ pub struct Profile {
     /// The model name a Codex or Claude CLI receives; `None` uses its default.
     cli_model: Option<String>,
     share_window_title: bool,
+    /// The Global mode's terms, then this mode's, without case-insensitive
+    /// duplicates.
+    vocabulary: Vec<String>,
     deadline: Duration,
     replacements: ReplacementSet,
     transformations: Vec<String>,
@@ -88,6 +91,7 @@ impl Profile {
             model: None,
             cli_model: None,
             share_window_title: false,
+            vocabulary: Vec::new(),
             deadline: Duration::from_secs(30),
             replacements: ReplacementSet::default(),
             transformations: Vec::new(),
@@ -124,6 +128,23 @@ impl Profile {
         self
     }
 
+    /// Adds terms after the existing ones, skipping blanks and terms already
+    /// present in any letter case.
+    pub fn vocabulary<'a>(mut self, terms: impl IntoIterator<Item = &'a String>) -> Self {
+        for term in terms {
+            let term = term.trim();
+            if !term.is_empty()
+                && !self
+                    .vocabulary
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(term))
+            {
+                self.vocabulary.push(term.to_owned());
+            }
+        }
+        self
+    }
+
     pub fn model(mut self, provider: impl Into<String>, id: impl Into<String>) -> Self {
         self.model = Some(Model {
             provider: provider.into(),
@@ -148,13 +169,17 @@ impl Profile {
 
     /// Builds a runtime profile from persisted settings. A malformed model key
     /// falls back to the default model rather than disabling the mode.
+    /// `global_vocabulary` is the Global mode's list, which every mode shares.
     pub(crate) fn configured(
         name: impl Into<String>,
         replacements: ReplacementSet,
         transformations: Vec<String>,
         settings: &PostProcessingSettings,
+        global_vocabulary: &[String],
     ) -> Self {
         let profile = Self::new(name, &settings.prompt)
+            .vocabulary(global_vocabulary)
+            .vocabulary(&settings.vocabulary)
             .ai_enabled(settings.enabled)
             .replacements(replacements)
             .transformations(transformations)
@@ -341,6 +366,7 @@ impl Profiles {
             &corrected,
             context,
             profile.share_window_title,
+            &profile.vocabulary,
         );
         let (text, observation) = if profile.provider == RewriteProvider::OpenCode {
             let (text, mut observation) = generate_observed(
@@ -2553,6 +2579,7 @@ mod tests {
             "This is the current transcript.",
             &context("Slack", None),
             false,
+            &[],
         )
         .combined();
         assert!(prompt.contains("Rewrite freely."));
@@ -2606,7 +2633,13 @@ mod tests {
             deadline_seconds: 8,
             ..PostProcessingSettings::default()
         };
-        let profile = Profile::configured("Chat", ReplacementSet::default(), Vec::new(), &settings);
+        let profile = Profile::configured(
+            "Chat",
+            ReplacementSet::default(),
+            Vec::new(),
+            &settings,
+            &[],
+        );
         assert_eq!(profile.provider, RewriteProvider::Claude);
         assert_eq!(profile.cli_model.as_deref(), Some("haiku"));
         assert!(profile.model.is_none());
@@ -2621,9 +2654,27 @@ mod tests {
                 model: Some("anthropic/claude-haiku-4-5".into()),
                 ..PostProcessingSettings::default()
             },
+            &[],
         );
         assert_eq!(opencode.provider, RewriteProvider::OpenCode);
         assert_eq!(opencode.model.unwrap().id, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn mode_vocabulary_follows_the_global_list_without_duplicates() {
+        let settings = PostProcessingSettings {
+            vocabulary: vec!["github".into(), "Bodea".into(), " ".into()],
+            ..PostProcessingSettings::default()
+        };
+        let global = ["Hex".to_owned(), "GitHub".to_owned()];
+        let profile = Profile::configured(
+            "Chat",
+            ReplacementSet::default(),
+            Vec::new(),
+            &settings,
+            &global,
+        );
+        assert_eq!(profile.vocabulary, ["Hex", "GitHub", "Bodea"]);
     }
 
     #[test]

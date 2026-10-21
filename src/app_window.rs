@@ -548,6 +548,7 @@ struct ModeInputs {
     name: ProcessingInput,
     browser_hosts: ProcessingInput,
     prompt: ProcessingInput,
+    vocabulary: ProcessingInput,
     model: ProcessingInput,
     /// The free-form Codex or Claude model name.
     cli_model: ProcessingInput,
@@ -5688,6 +5689,11 @@ impl AppWindow {
                 &processing.prompt,
                 cx,
             ),
+            vocabulary: Self::multiline_processing_input(
+                "GitHub\nKubernetes\nJake Bodea",
+                &processing.vocabulary.join("\n"),
+                cx,
+            ),
             model: Self::model_input(
                 if processing.provider == RewriteProvider::OpenCode {
                     processing.model.as_deref().unwrap_or_default()
@@ -7128,10 +7134,11 @@ impl AppWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (prompt, model, cli_model, deadline) = {
+        let (prompt, vocabulary, model, cli_model, deadline) = {
             let inputs = self.mode_inputs_for(selection);
             (
                 inputs.prompt.entity.clone(),
+                inputs.vocabulary.entity.clone(),
                 inputs.model.entity.clone(),
                 inputs.cli_model.entity.clone(),
                 inputs.deadline.entity.clone(),
@@ -7274,6 +7281,15 @@ impl AppWindow {
                 tr("Instructions"),
                 tr("System instructions for rewriting dictation in this mode"),
                 prompt,
+            ))
+            .child(settings_control(
+                tr("Vocabulary"),
+                if selection == ModeSelection::Default {
+                    tr("Names and terms to prefer over similar-sounding words, one per line. Every mode uses these.")
+                } else {
+                    tr("Extra names and terms for this mode, one per line. Global vocabulary also applies.")
+                },
+                vocabulary,
             ))
             .child(window_title)
             .into_any_element()
@@ -8369,6 +8385,16 @@ fn input_text(input: &ProcessingInput, cx: &App) -> String {
     input.entity.read(cx).text().trim().to_string()
 }
 
+/// One term per line; commas also separate terms.
+fn vocabulary_terms(value: &str) -> Vec<String> {
+    value
+        .split(['\n', ','])
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn browser_hosts(value: &str) -> Vec<String> {
     let mut hosts: Vec<_> = value
         .split(',')
@@ -8425,6 +8451,7 @@ fn apply_mode_inputs(inputs: &ModeInputs, mode: &mut DictationMode, is_default: 
         .collect();
     mode.post_processing.enabled = inputs.processing_toggle.enabled();
     mode.post_processing.prompt = input_text(&inputs.prompt, cx);
+    mode.post_processing.vocabulary = vocabulary_terms(&input_text(&inputs.vocabulary, cx));
     if mode.post_processing.provider != RewriteProvider::OpenCode {
         mode.post_processing.model =
             Some(input_text(&inputs.cli_model, cx)).filter(|model| !model.is_empty());
@@ -9802,6 +9829,14 @@ mod tests {
             (Some("Brave Browser".into()), Some("meet.google.com".into()))
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn vocabulary_terms_split_on_lines_and_commas() {
+        assert_eq!(
+            vocabulary_terms(" GitHub\n\nJake Bodea, Hex ,\n"),
+            ["GitHub", "Jake Bodea", "Hex"]
+        );
     }
 
     #[test]

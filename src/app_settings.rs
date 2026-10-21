@@ -759,6 +759,9 @@ pub struct DictationPostProcessing {
     /// Sends the focused window title to the rewriter. Off by default because
     /// titles can name documents, contacts, or email subjects.
     pub share_window_title: bool,
+    /// Names and terms the rewriter should prefer when the transcript holds a
+    /// similar-sounding word. The Global mode's list applies to every mode.
+    pub vocabulary: Vec<String>,
 }
 
 impl DictationPostProcessing {
@@ -791,6 +794,7 @@ impl Default for DictationPostProcessing {
             variant: None,
             deadline_seconds: 30,
             share_window_title: false,
+            vocabulary: Vec::new(),
         }
     }
 }

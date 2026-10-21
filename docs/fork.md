@@ -14,6 +14,9 @@ are disabled, and the default push remote and GitHub CLI repository are the fork
   settings and install/sign-in status. See [AI rewriting](features/README.md#ai-rewriting-providers).
 - Shared destination-aware rewrite prompts, optional window-title sharing, and a
   focus guard that holds rewritten text for Paste Last when another app takes focus.
+- Rewrite rules that repair misheard speech recognition, plus a per-mode
+  Vocabulary list (Global applies everywhere) the rewriter prefers for names and
+  jargon, so smaller local speech models stay usable.
 - An Apple Development signed local installer that retains the installed app's
   resources and turns off Sparkle updates so the upstream feed cannot replace it.
 

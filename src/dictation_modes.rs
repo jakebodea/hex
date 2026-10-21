@@ -54,6 +54,7 @@ impl ModeRuntime {
                     ReplacementSet::default(),
                     self.default_transformations.clone(),
                     &self.default,
+                    &[],
                 )
             },
             |mode| {
@@ -67,6 +68,7 @@ impl ModeRuntime {
                     ReplacementSet::new(&mode.replacements),
                     mode.transformations.clone(),
                     &mode.post_processing,
+                    &self.default.vocabulary,
                 )
             },
         );

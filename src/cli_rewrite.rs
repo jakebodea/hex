@@ -902,6 +902,7 @@ mod tests {
                 ..ContextSnapshot::default()
             },
             false,
+            &[],
         )
     }
 

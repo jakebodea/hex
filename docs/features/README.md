@@ -459,15 +459,22 @@ Focused app changed during a rewrite -> No paste; Paste Last holds the text
 [rewrite_prompt.rs](../../src/rewrite_prompt.rs) builds one provider-neutral
 prompt: fixed cleanup rules, a destination style inferred locally from bundle
 ID, application name, Brave URL, or (browsers only) the window title's site
-suffix, then the mode's instructions and the tag-delimited transcript. The
-window title itself leaves the Mac only when the mode enables **Share window
+suffix, then the mode's instructions, an optional `<vocabulary>` block, and
+the tag-delimited transcript. The rules tell the rewriter the transcript is
+speech recognition output and to replace implausible words with the
+similar-sounding intended word, preferring vocabulary spellings
+(`modes.vocabulary`). The Global mode's **Vocabulary** applies to every mode;
+a mode's own terms follow it without case-insensitive duplicates, bounded to
+200 terms of 80 characters. Vocabulary only reaches the rewriter, so it has no
+effect with AI rewriting off. The window title itself leaves the Mac only when the mode enables **Share window
 title** (default off). Switching a mode to Codex or Claude starts it on
 `gpt-6-luna` or `haiku` with a 10-second deadline.
 
 Checks: `cli_rewrite::tests` run fake CLIs for stdin/argv safety, Unicode and
 200k-word inputs, auth and API-key refusal, tool refusal, timeouts,
 cancellation, concurrency, and stderr redaction; `rewrite_prompt::tests` cover
-destination selection and injection-resistant blocks;
+destination selection, injection-resistant blocks, and vocabulary bounds;
+`mode_vocabulary_follows_the_global_list_without_duplicates` covers the merge;
 `rewritten_text_never_pastes_into_an_application_that_took_focus` in
 [parakeet.rs](../../src/parakeet.rs) covers the focus guard. The ignored
 `live_cli_rewrite` probe exercises the installed, signed-in CLIs. No check

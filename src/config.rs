@@ -31,9 +31,10 @@ fn dictation_profiles_lock() -> &'static RwLock<Profiles> {
 }
 
 fn build_dictation_profiles(settings: &DictationProcessingSettings) -> Profiles {
-    let mut profiles = Profiles::new(mode_profile(&settings.default_mode));
+    let global_vocabulary = &settings.default_mode.post_processing.vocabulary;
+    let mut profiles = Profiles::new(mode_profile(&settings.default_mode, &[]));
     for mode in &settings.modes {
-        let profile = mode_profile(mode);
+        let profile = mode_profile(mode, global_vocabulary);
         for application in &mode.applications {
             profiles = profiles.application(application.clone(), profile.clone());
         }
@@ -44,7 +45,10 @@ fn build_dictation_profiles(settings: &DictationProcessingSettings) -> Profiles 
     profiles
 }
 
-fn mode_profile(mode: &crate::app_settings::DictationMode) -> Profile {
+fn mode_profile(
+    mode: &crate::app_settings::DictationMode,
+    global_vocabulary: &[String],
+) -> Profile {
     let name = if mode.name.trim().is_empty() {
         "Untitled mode"
     } else {
@@ -55,6 +59,7 @@ fn mode_profile(mode: &crate::app_settings::DictationMode) -> Profile {
         crate::text_replacements::ReplacementSet::new(&mode.replacements),
         mode.transformations.clone(),
         &mode.post_processing,
+        global_vocabulary,
     )
 }
 
