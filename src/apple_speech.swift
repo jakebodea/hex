@@ -100,7 +100,7 @@ private actor AppleSpeechAssetReservations {
 @available(macOS 26.0, *)
 private actor AppleSpeechSession {
     let locale: Locale
-    private var prepared: (SpeechTranscriber, SpeechAnalyzer)?
+    private var prepared: (SpeechTranscriber, SpeechAnalyzer, AVAudioFormat)?
     private var localeReserved = false
     private var releaseWhenIdle = false
     private var transcriptionActive = false
@@ -126,8 +126,9 @@ private actor AppleSpeechSession {
                 throw BridgeError("Apple Speech assets are not installed for \(locale.identifier).")
             }
             let analyzer = makeAnalyzer(transcriber)
-            try await analyzer.prepareToAnalyze(in: Self.audioFormat)
-            prepared = (transcriber, analyzer)
+            let format = try await Self.analyzerFormat(for: transcriber)
+            try await analyzer.prepareToAnalyze(in: format)
+            prepared = (transcriber, analyzer, format)
         } catch {
             await releaseAssets()
             throw error
@@ -169,27 +170,32 @@ private actor AppleSpeechSession {
     private func performTranscription(samples: [Float]) async throws -> BridgeTranscript {
         let transcriber: SpeechTranscriber
         let analyzer: SpeechAnalyzer
+        let format: AVAudioFormat
         if let prepared {
-            (transcriber, analyzer) = prepared
+            (transcriber, analyzer, format) = prepared
             self.prepared = nil
         } else {
             transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
             analyzer = makeAnalyzer(transcriber)
+            format = try await Self.analyzerFormat(for: transcriber)
+            try await analyzer.prepareToAnalyze(in: format)
         }
 
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: Self.audioFormat,
-            frameCapacity: AVAudioFrameCount(samples.count)
-        ) else {
+        guard !samples.isEmpty,
+              let source = AVAudioPCMBuffer(
+                  pcmFormat: Self.audioFormat,
+                  frameCapacity: AVAudioFrameCount(samples.count)
+              ) else {
             throw BridgeError("Could not allocate an Apple Speech audio buffer.")
         }
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        guard let channel = buffer.floatChannelData?[0] else {
+        source.frameLength = AVAudioFrameCount(samples.count)
+        guard let channel = source.floatChannelData?[0] else {
             throw BridgeError("Apple Speech did not provide a mono audio channel.")
         }
-        samples.withUnsafeBufferPointer { source in
-            channel.update(from: source.baseAddress!, count: samples.count)
+        samples.withUnsafeBufferPointer { samples in
+            channel.update(from: samples.baseAddress!, count: samples.count)
         }
+        let buffer = try Self.convert(source, to: format)
 
         let input = AsyncStream<AnalyzerInput> { continuation in
             continuation.yield(AnalyzerInput(buffer: buffer))
@@ -272,6 +278,51 @@ private actor AppleSpeechSession {
                 modelRetention: .lingering
             )
         )
+    }
+
+    /// The analyzer traps on audio it was not prepared for, so every buffer
+    /// is converted to the format Speech reports for this transcriber.
+    private static func analyzerFormat(
+        for transcriber: SpeechTranscriber
+    ) async throws -> AVAudioFormat {
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(
+            compatibleWith: [transcriber]
+        ) else {
+            throw BridgeError("Apple Speech reported no compatible audio format.")
+        }
+        return format
+    }
+
+    private static func convert(
+        _ source: AVAudioPCMBuffer,
+        to format: AVAudioFormat
+    ) throws -> AVAudioPCMBuffer {
+        if source.format == format {
+            return source
+        }
+        guard let converter = AVAudioConverter(from: source.format, to: format) else {
+            throw BridgeError("Apple Speech cannot convert audio to \(format).")
+        }
+        let ratio = format.sampleRate / source.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(source.frameLength) * ratio).rounded(.up)) + 1_024
+        guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            throw BridgeError("Could not allocate an Apple Speech audio buffer.")
+        }
+        var consumed = false
+        var conversionError: NSError?
+        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+            if consumed {
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            consumed = true
+            inputStatus.pointee = .haveData
+            return source
+        }
+        if status == .error {
+            throw conversionError ?? BridgeError("Apple Speech audio conversion failed.")
+        }
+        return output
     }
 
     private static let audioFormat = AVAudioFormat(
