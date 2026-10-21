@@ -14,16 +14,19 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 base=${HEX_BASE_APP:-/Applications/Hex.app}
-identity=${HEX_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' | head -1)}
+. "$root/scripts/personal-signing.sh"
 bundle="$root/target/app/Hex.app"
 installed=/Applications/Hex.app
 
-if [ -z "$identity" ]; then
-  echo "No Apple Development signing identity found. Set HEX_SIGN_IDENTITY." >&2
-  exit 1
-fi
 if [ ! -x "$base/Contents/MacOS/hex" ]; then
   echo "Base app $base not found. Install Hex once, or set HEX_BASE_APP." >&2
+  exit 1
+fi
+
+identity=$(hex_personal_codesign_identity "$base")
+base_requirement=$(codesign -d -r- "$base" 2>&1 | sed -n 's/^designated => //p')
+if [ -z "$base_requirement" ]; then
+  echo "Base app has no designated signing requirement." >&2
   exit 1
 fi
 
@@ -53,6 +56,9 @@ if [ -d "$bundle/Contents/Library/HexMicrophone.driver" ]; then
 fi
 sign --entitlements "$root/app/VoiceControl.entitlements" "$bundle"
 codesign --verify --deep --strict "$bundle"
+if [ -z "${HEX_SIGN_IDENTITY:-}" ]; then
+  codesign --verify --strict -R "=$base_requirement" "$bundle"
+fi
 echo "Built $bundle (signed by $identity)"
 
 if [ "${1:-}" = "--install" ]; then

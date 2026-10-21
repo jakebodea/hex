@@ -11,6 +11,9 @@ on:
       - "resources/**"
       - "assets/**"
       - ".github/workflows/check-macos.yml"
+      - "scripts/personal-signing.sh"
+      - "scripts/build-personal-app.sh"
+      - "scripts/test-personal-signing.sh"
   push:
     branches: [main]
     paths:
@@ -22,6 +25,9 @@ on:
       - "resources/**"
       - "assets/**"
       - ".github/workflows/check-macos.yml"
+      - "scripts/personal-signing.sh"
+      - "scripts/build-personal-app.sh"
+      - "scripts/test-personal-signing.sh"
 
 permissions:
   contents: read
@@ -46,6 +52,7 @@ jobs:
           cache-on-failure: true
       - name: Install the Metal toolchain
         run: xcrun --sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      - run: ./scripts/test-personal-signing.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --bin voice-control --tests -- -D warnings
       - run: cargo test --locked --bin voice-control

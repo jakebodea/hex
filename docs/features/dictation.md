@@ -549,6 +549,16 @@ the dark capsule and white bars; the personal signed build was installed and
 relaunched, and its installed executable matched the staged signed bundle.
 No live microphone latency was measured.
 
+Personal-app updates preserve the installed Apple Development signer and verify
+its designated requirement before replacement (`scripts/personal-signing.sh`,
+`scripts/build-personal-app.sh`). Selecting a different signer invalidates
+macOS privacy grants and prevents the shortcut listener from starting. Missing
+keys fail closed; an intentional signer change requires `HEX_SIGN_IDENTITY`.
+The signing fixture checks Keychain order changes and missing keys. On October
+21, 2026, restoring the original signer cleared all three permission warnings
+and the installed app logged listener startup and successful model prewarm.
+This does not prove a subsequent physical Fn press or microphone capture.
+
 The macOS HUD is a click-through, nonactivating `NSPanel` with
 `CanJoinAllSpaces`, `CanJoinAllApplications`, and `FullScreenAuxiliary` collection
 behaviors. The cross-application flag explicitly allows the overlay to join

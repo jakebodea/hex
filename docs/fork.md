@@ -23,6 +23,7 @@ Use the same macOS deployment target for builds and checks to share the cache:
 
 ```sh
 export MACOSX_DEPLOYMENT_TARGET=15.0
+./scripts/test-personal-signing.sh
 cargo fmt --check
 cargo test --locked --release --bin voice-control
 cargo clippy --locked --release --bin voice-control --tests -- -D warnings
@@ -31,8 +32,12 @@ git diff --check
 ```
 
 The installer needs an existing `/Applications/Hex.app` as its resource template
-and an Apple Development signing identity in Keychain. Override these with
-`HEX_BASE_APP` and `HEX_SIGN_IDENTITY` if needed. It moves the previous app to the
+and its existing Apple Development signing identity in Keychain. Updates reuse
+that exact signer and verify the new app against the previous designated
+requirement before installation. A missing key fails instead of selecting a
+different certificate, because macOS privacy grants depend on the signer.
+Set `HEX_SIGN_IDENTITY` explicitly for the first transition from an upstream
+release, or an intentional identity repair; `HEX_BASE_APP` overrides the template. It moves the previous app to the
 Trash before replacement and relaunches Hex. This is a personal build, not a
 notarized public release; no updater feed or release credentials are configured
 for this fork. The README's public downloads still refer to upstream binaries.
