@@ -149,6 +149,7 @@ fn draw(
                 ..
             } => Some(ContextSnapshot {
                 application: application.clone(),
+                bundle_id: None,
                 browser_url: browser_url
                     .as_deref()
                     .and_then(|url| url::Url::parse(url).ok()),

@@ -332,6 +332,7 @@ mod tests {
     fn context(application: &str, url: Option<&str>, title: &str) -> ContextSnapshot {
         ContextSnapshot {
             application: Some(application.into()),
+            bundle_id: None,
             browser_url: url.map(|url| Url::parse(url).unwrap()),
             window_title: Some(title.into()),
             selected_text: None,

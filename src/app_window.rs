@@ -14,9 +14,10 @@ use gpui::{
 
 use crate::app_settings::{
     AppSettings, DictationMode, HotkeyBinding, HotkeyKey, HotkeyModifiers, IndicatorPosition,
-    ModifierSide, RecordingAudioBehavior, TextReplacement,
+    ModifierSide, RecordingAudioBehavior, RewriteProvider, TextReplacement,
 };
 use crate::application_catalog::InstalledApplication;
+use crate::cli_rewrite::{CliProvider, CliStatus};
 use crate::design_tokens::*;
 use crate::desktop_activity::DesktopActivity;
 use crate::desktop_i18n::{event_age, tr, tr_fill, tr_named};
@@ -371,6 +372,7 @@ pub struct AppWindowPreview {
     pub select_global_mode: bool,
     pub voice_action_enabled: bool,
     pub opencode_unavailable: bool,
+    pub claude_rewrite: bool,
     pub permissions_missing: bool,
     pub model_missing: bool,
     pub command_model_missing: bool,
@@ -547,8 +549,11 @@ struct ModeInputs {
     browser_hosts: ProcessingInput,
     prompt: ProcessingInput,
     model: ProcessingInput,
+    /// The free-form Codex or Claude model name.
+    cli_model: ProcessingInput,
     deadline: ProcessingInput,
     processing_toggle: ToggleSpring,
+    window_title_toggle: ToggleSpring,
     replacements: Vec<ReplacementInputs>,
 }
 
@@ -744,6 +749,50 @@ fn start_model_catalog_load() -> Receiver<ModelCatalogState> {
             ModelCatalogState::Missing
         };
         let _ = sender.send(state);
+    });
+    receiver
+}
+
+/// Codex and Claude rewriting run the installed CLIs as subprocesses, which
+/// the Windows build does not support yet.
+const CLI_REWRITE_AVAILABLE: bool = cfg!(not(target_os = "windows"));
+
+/// Install and sign-in state per CLI provider; `None` while checking.
+#[derive(Clone, Default)]
+struct CliStatuses {
+    codex: Option<CliStatus>,
+    claude: Option<CliStatus>,
+}
+
+impl CliStatuses {
+    fn get(&self, provider: CliProvider) -> Option<&CliStatus> {
+        match provider {
+            CliProvider::Codex => self.codex.as_ref(),
+            CliProvider::Claude => self.claude.as_ref(),
+        }
+    }
+
+    /// The first provider that can rewrite right now.
+    fn first_ready(&self) -> Option<RewriteProvider> {
+        [
+            (RewriteProvider::Claude, &self.claude),
+            (RewriteProvider::Codex, &self.codex),
+        ]
+        .into_iter()
+        .find_map(|(provider, status)| {
+            matches!(status, Some(CliStatus::Ready(_))).then_some(provider)
+        })
+    }
+}
+
+fn start_cli_status_load() -> Receiver<CliStatuses> {
+    let (sender, receiver) = sync_channel(1);
+    thread::spawn(move || {
+        let statuses = CliStatuses {
+            codex: Some(crate::cli_rewrite::status(CliProvider::Codex)),
+            claude: Some(crate::cli_rewrite::status(CliProvider::Claude)),
+        };
+        let _ = sender.send(statuses);
     });
     receiver
 }
@@ -1190,6 +1239,8 @@ pub struct AppWindow {
     model_catalog: ModelCatalogState,
     model_catalog_receiver: Option<Receiver<ModelCatalogState>>,
     model_catalog_retry_at: Instant,
+    cli_statuses: CliStatuses,
+    cli_status_receiver: Option<Receiver<CliStatuses>>,
     application_catalog: ApplicationCatalogState,
     application_catalog_receiver: Option<Receiver<Vec<InstalledApplication>>>,
     application_search: ProcessingInput,
@@ -1268,7 +1319,8 @@ impl AppWindow {
                         } else {
                             Duration::from_millis(500)
                         };
-                        let model_catalog_changed = window.poll_model_catalog();
+                        let model_catalog_changed =
+                            window.poll_model_catalog() | window.poll_cli_statuses();
                         window.retry_model_catalog();
                         let application_catalog_changed = window.poll_application_catalog();
                         let transcription_changed = window.poll_transcription_download();
@@ -1350,6 +1402,9 @@ impl AppWindow {
                     "Tighten prose and preserve technical terminology.".into();
                 mode.post_processing.model = Some("anthropic/claude-sonnet-4".into());
                 mode.post_processing.variant = Some("medium".into());
+                if preview.claude_rewrite {
+                    mode.post_processing.set_provider(RewriteProvider::Claude);
+                }
                 settings.dictation_processing.modes.push(mode);
             }
             (settings, None)
@@ -1716,6 +1771,16 @@ impl AppWindow {
             model_catalog,
             model_catalog_receiver,
             model_catalog_retry_at: Instant::now() + OPENCODE_INSTALL_RETRY_INTERVAL,
+            cli_statuses: if preview_mode {
+                CliStatuses {
+                    codex: Some(CliStatus::Missing),
+                    claude: Some(CliStatus::Ready("Signed in with Claude Max".into())),
+                }
+            } else {
+                CliStatuses::default()
+            },
+            cli_status_receiver: (!preview_mode && CLI_REWRITE_AVAILABLE)
+                .then(start_cli_status_load),
             application_catalog,
             application_catalog_receiver: None,
             application_search,
@@ -1938,6 +2003,9 @@ impl AppWindow {
             crate::hex_microphone::stop_demo_playback();
             crate::hex_microphone::stop_demo_recording();
         }
+        if self.pane == Pane::HudLab && pane != Pane::HudLab {
+            self.platform_leave_hud_lab();
+        }
         self.pane = pane;
         self.mode_context_menu = None;
         self.history_retention_open = false;
@@ -2066,6 +2134,68 @@ impl AppWindow {
 
     fn opencode_available(&self) -> bool {
         matches!(&self.model_catalog, ModelCatalogState::Loaded(_))
+    }
+
+    fn poll_cli_statuses(&mut self) -> bool {
+        let Some(receiver) = &self.cli_status_receiver else {
+            return false;
+        };
+        let Ok(statuses) = receiver.try_recv() else {
+            return false;
+        };
+        self.cli_statuses = statuses;
+        self.cli_status_receiver = None;
+        true
+    }
+
+    fn reload_cli_statuses(&mut self) {
+        if self.preview || self.cli_status_receiver.is_some() {
+            return;
+        }
+        self.cli_statuses = CliStatuses::default();
+        self.cli_status_receiver = Some(start_cli_status_load());
+    }
+
+    /// Switching providers resets the model to the new provider's default,
+    /// so the visible inputs follow the saved values.
+    fn set_rewrite_provider(
+        &mut self,
+        selection: ModeSelection,
+        provider: RewriteProvider,
+        cx: &mut Context<Self>,
+    ) {
+        let mut processing = None;
+        if !self.update_mode_settings(selection, cx, |mode| {
+            mode.post_processing.set_provider(provider);
+            processing = Some(mode.post_processing.clone());
+        }) {
+            return;
+        }
+        let Some(processing) = processing else {
+            return;
+        };
+        let model = processing.model.unwrap_or_default();
+        let inputs = self.mode_inputs_mut(selection);
+        let (cli_model, opencode_model, deadline) = (
+            inputs.cli_model.entity.clone(),
+            inputs.model.entity.clone(),
+            inputs.deadline.entity.clone(),
+        );
+        let cli_text = if provider == RewriteProvider::OpenCode {
+            String::new()
+        } else {
+            model.clone()
+        };
+        cli_model.update(cx, |input, cx| input.set_text(cli_text, cx));
+        let opencode_text = if provider == RewriteProvider::OpenCode {
+            model
+        } else {
+            String::new()
+        };
+        opencode_model.update(cx, |input, cx| input.set_text(opencode_text, cx));
+        deadline.update(cx, |input, cx| {
+            input.set_text(processing.deadline_seconds.to_string(), cx)
+        });
     }
 
     fn poll_application_catalog(&mut self) -> bool {
@@ -5559,12 +5689,26 @@ impl AppWindow {
                 cx,
             ),
             model: Self::model_input(
-                processing.model.as_deref().unwrap_or_default(),
+                if processing.provider == RewriteProvider::OpenCode {
+                    processing.model.as_deref().unwrap_or_default()
+                } else {
+                    ""
+                },
                 |this| ModelPickerTarget::Mode(this.selected_mode),
+                cx,
+            ),
+            cli_model: Self::processing_input(
+                "haiku",
+                if processing.provider == RewriteProvider::OpenCode {
+                    ""
+                } else {
+                    processing.model.as_deref().unwrap_or_default()
+                },
                 cx,
             ),
             deadline: Self::processing_input("30", &processing.deadline_seconds.to_string(), cx),
             processing_toggle: ToggleSpring::new(processing.enabled),
+            window_title_toggle: ToggleSpring::new(processing.share_window_title),
             replacements: mode
                 .replacements
                 .iter()
@@ -5793,21 +5937,26 @@ impl AppWindow {
     fn render_mode_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selection = self.selected_mode;
         let is_default = selection == ModeSelection::Default;
-        let (name, browser_hosts, prompt, model, deadline, processing_position) = {
+        let (name, browser_hosts, processing_position) = {
             let inputs = self.selected_mode_inputs_mut();
             (
                 inputs.name.entity.clone(),
                 inputs.browser_hosts.entity.clone(),
-                inputs.prompt.entity.clone(),
-                inputs.model.entity.clone(),
-                inputs.deadline.entity.clone(),
                 inputs.processing_toggle.render_position(window),
             )
         };
         let processing_enabled = self.selected_mode_settings().post_processing.enabled;
-        let processing_can_toggle = processing_enabled || self.opencode_available();
-        let processing_unavailable =
-            opencode_unavailable_copy(&self.model_catalog, OpenCodeFeature::Transformation);
+        let provider = self.selected_mode_settings().post_processing.provider;
+        let ready_cli = CLI_REWRITE_AVAILABLE
+            .then(|| self.cli_statuses.first_ready())
+            .flatten();
+        let processing_can_toggle =
+            processing_enabled || self.opencode_available() || ready_cli.is_some();
+        let processing_unavailable = (provider == RewriteProvider::OpenCode && ready_cli.is_none())
+            .then(|| {
+                opencode_unavailable_copy(&self.model_catalog, OpenCodeFeature::Transformation)
+            })
+            .flatten();
         let corrections = self.render_mode_replacements(selection, cx);
         let transformations = self.render_mode_transformations(selection, window, cx);
         let application_picker =
@@ -5892,6 +6041,16 @@ impl AppWindow {
             .when(processing_can_toggle, |control| {
                 control.on_click(cx.listener(move |this, _, _, cx| {
                     let enabled = !this.selected_mode_settings().post_processing.enabled;
+                    // Without OpenCode, enabling starts on a signed-in CLI.
+                    let fallback_provider = (enabled
+                        && this.selected_mode_settings().post_processing.provider
+                            == RewriteProvider::OpenCode
+                        && !this.opencode_available())
+                    .then_some(ready_cli)
+                    .flatten();
+                    if let Some(provider) = fallback_provider {
+                        this.set_rewrite_provider(this.selected_mode, provider, cx);
+                    }
                     if this.update_mode_settings(this.selected_mode, cx, |mode| {
                         mode.post_processing.enabled = enabled;
                     }) {
@@ -5902,16 +6061,8 @@ impl AppWindow {
                 }))
             })
             .into_any_element();
-        let processing_settings = processing_enabled.then(|| {
-            self.render_processing_settings(
-                ModelPickerTarget::Mode(selection),
-                prompt,
-                model,
-                deadline,
-                window,
-                cx,
-            )
-        });
+        let processing_settings =
+            processing_enabled.then(|| self.render_processing_settings(selection, window, cx));
         let processing_unavailable = processing_unavailable.map(|copy| {
             let show_actions = copy.can_retry || copy.can_open_setup;
             let actions = Self::opencode_unavailable_actions(
@@ -5959,7 +6110,7 @@ impl AppWindow {
         });
         let processing = panel()
             .child(
-                panel_header(tr("OpenCode transformation"), Some(processing_toggle)).when(
+                panel_header(tr("AI rewriting"), Some(processing_toggle)).when(
                     !processing_enabled && processing_unavailable.is_none(),
                     |header| header.border_b_0(),
                 ),
@@ -6973,60 +7124,135 @@ impl AppWindow {
 
     fn render_processing_settings(
         &mut self,
-        target: ModelPickerTarget,
-        prompt: Entity<TextInput>,
-        model: Entity<TextInput>,
-        deadline: Entity<TextInput>,
+        selection: ModeSelection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (prompt, model, cli_model, deadline) = {
+            let inputs = self.mode_inputs_for(selection);
+            (
+                inputs.prompt.entity.clone(),
+                inputs.model.entity.clone(),
+                inputs.cli_model.entity.clone(),
+                inputs.deadline.entity.clone(),
+            )
+        };
         let compact = window.viewport_size().width < px(980.0);
-        let ProcessingPicker {
-            catalog_status,
-            model_control,
-            refresh_control,
-            suggestions,
-            has_variants,
-            variant_control,
-        } = self.processing_picker(target, model, window, cx);
+        let processing = self.mode_settings(selection).post_processing.clone();
+        let cli = CliProvider::from_rewrite(processing.provider);
+        let (model_field, variant_control) = match cli {
+            Some(cli) => (self.render_cli_model(cli, cli_model, cx), None),
+            None => {
+                let ProcessingPicker {
+                    catalog_status,
+                    model_control,
+                    refresh_control,
+                    suggestions,
+                    has_variants,
+                    variant_control,
+                } = self.processing_picker(ModelPickerTarget::Mode(selection), model, window, cx);
+                let field = div()
+                    .child(settings_control(
+                        tr("Model"),
+                        &catalog_status,
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().min_w(px(0.0)).flex_1().child(model_control))
+                            .when_some(refresh_control, |row, refresh| row.child(refresh))
+                            .into_any_element(),
+                    ))
+                    .when(
+                        matches!(&self.model_catalog, ModelCatalogState::Missing),
+                        |field| {
+                            field.child(
+                                button(ButtonKind::Secondary, tr("Install OpenCode"))
+                                    .mt_2()
+                                    .id("install-opencode-beta")
+                                    .on_click(|_, _, _| open_opencode_beta_docs()),
+                            )
+                        },
+                    )
+                    .when_some(suggestions, |field, suggestions| field.child(suggestions))
+                    .into_any_element();
+                (field, has_variants.then_some(variant_control))
+            }
+        };
+        let provider_control = CLI_REWRITE_AVAILABLE.then(|| {
+            let widths = [88.0, 72.0, 72.0];
+            let selected = RewriteProvider::ALL
+                .iter()
+                .position(|provider| *provider == processing.provider)
+                .unwrap_or(0);
+            sliding_segmented_for(window, "rewrite-provider", selected, &widths).children(
+                RewriteProvider::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, provider)| {
+                        sliding_segmented_item(widths[index], index == selected)
+                            .id(("rewrite-provider", index))
+                            .child(provider.label())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_rewrite_provider(selection, provider, cx);
+                            }))
+                    }),
+            )
+        });
+        let title_position = self
+            .mode_inputs_mut(selection)
+            .window_title_toggle
+            .render_position(window);
+        let window_title = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(settings_copy(
+                tr("Share window title"),
+                tr("Lets the rewriter see the focused window title, which can name documents or email subjects."),
+            ))
+            .child(
+                div()
+                    .id("mode-window-title-toggle")
+                    .flex_none()
+                    .child(toggle(title_position))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let share = !this.mode_settings(selection).post_processing.share_window_title;
+                        if this.update_mode_settings(selection, cx, |mode| {
+                            mode.post_processing.share_window_title = share;
+                        }) {
+                            this.mode_inputs_mut(selection)
+                                .window_title_toggle
+                                .set_enabled(share);
+                        }
+                    })),
+            );
         div()
             .pt_5()
             .flex()
             .flex_col()
             .gap_5()
+            .when_some(provider_control, |processing, control| {
+                processing.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_2()
+                        .child(settings_copy(
+                            tr("Provider"),
+                            tr("Codex and Claude reuse your ChatGPT or Claude sign-in; nothing is billed to an API key."),
+                        ))
+                        .child(control),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .when(compact, |fields| fields.flex_col())
                     .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(settings_control(
-                                tr("Model"),
-                                &catalog_status,
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().min_w(px(0.0)).flex_1().child(model_control))
-                                    .when_some(refresh_control, |row, refresh| row.child(refresh))
-                                    .into_any_element(),
-                            ))
-                            .when(
-                                matches!(&self.model_catalog, ModelCatalogState::Missing),
-                                |field| {
-                                    field.child(
-                                        button(ButtonKind::Secondary, tr("Install OpenCode"))
-                                            .mt_2()
-                                            .id("install-opencode-beta")
-                                            .on_click(|_, _, _| open_opencode_beta_docs()),
-                                    )
-                                },
-                            )
-                            .when_some(suggestions, |field, suggestions| field.child(suggestions)),
-                    )
+                    .child(div().flex_1().min_w(px(0.0)).child(model_field))
                     .child(
                         div()
                             .when(!compact, |field| field.w(px(150.0)).flex_none())
@@ -7034,7 +7260,7 @@ impl AppWindow {
                             .child(settings_control(tr("Deadline"), tr("Seconds"), deadline)),
                     ),
             )
-            .when(has_variants, |processing| {
+            .when_some(variant_control, |processing, variant_control| {
                 processing.child(
                     div()
                         .flex()
@@ -7049,6 +7275,81 @@ impl AppWindow {
                 tr("System instructions for rewriting dictation in this mode"),
                 prompt,
             ))
+            .child(window_title)
+            .into_any_element()
+    }
+
+    /// The Codex or Claude model name plus the CLI's install and sign-in
+    /// state, with the action that fixes it.
+    fn render_cli_model(
+        &self,
+        cli: CliProvider,
+        input: Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (color, message, install) = match self.cli_statuses.get(cli) {
+            None => (TEXT_TERTIARY, tr("Checking sign-in…").to_string(), false),
+            Some(CliStatus::Ready(detail)) => (SUCCESS, detail.clone(), false),
+            Some(CliStatus::Missing) => (DANGER, tr_fill("{} is not installed", cli.label()), true),
+            Some(CliStatus::Unavailable(error)) => (DANGER, bounded_opencode_error(error), false),
+        };
+        let checked = color != TEXT_TERTIARY;
+        let needs_action = color == DANGER;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(settings_control(
+                tr("Model"),
+                tr("Blank uses the CLI default"),
+                input,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(status_dot(color).flex_none())
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .text_footnote()
+                                    .text_color(rgb(if color == DANGER {
+                                        DANGER
+                                    } else {
+                                        TEXT_TERTIARY
+                                    }))
+                                    .child(message),
+                            ),
+                    )
+                    .when(install, |row| {
+                        row.child(
+                            small_button(ButtonKind::Secondary, tr("Install"))
+                                .id("cli-rewrite-install")
+                                .flex_none()
+                                .on_click(move |_, _, _| open_url(cli.install_url())),
+                        )
+                    })
+                    .when(checked && needs_action, |row| {
+                        row.child(
+                            small_button(ButtonKind::Secondary, tr("Check again"))
+                                .id("cli-rewrite-check")
+                                .flex_none()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.reload_cli_statuses();
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -7550,6 +7851,8 @@ fn preview_history() -> Option<History> {
                     profile: profile.into(),
                     latency_ms,
                     fallback: None,
+                    provider: None,
+                    startup_ms: None,
                 }),
                 audio_ms: 2_800,
                 inference_ms: 96,
@@ -7758,6 +8061,12 @@ fn sound_volume_index(settings: &AppSettings) -> usize {
                 .total_cmp(&(settings.sound_effect_volume - *right).abs())
         })
         .map_or(0, |(index, _)| index + 1)
+}
+
+fn open_url(url: &str) {
+    if let Err(error) = crate::commands::execute(crate::commands::Action::OpenUrl(url.into())) {
+        tracing::error!(%error, url, "could not open a setup page");
+    }
 }
 
 fn open_opencode_beta_docs() {
@@ -8116,6 +8425,10 @@ fn apply_mode_inputs(inputs: &ModeInputs, mode: &mut DictationMode, is_default: 
         .collect();
     mode.post_processing.enabled = inputs.processing_toggle.enabled();
     mode.post_processing.prompt = input_text(&inputs.prompt, cx);
+    if mode.post_processing.provider != RewriteProvider::OpenCode {
+        mode.post_processing.model =
+            Some(input_text(&inputs.cli_model, cx)).filter(|model| !model.is_empty());
+    }
     mode.post_processing.deadline_seconds = input_text(&inputs.deadline, cx)
         .parse::<u64>()
         .unwrap_or(mode.post_processing.deadline_seconds)
@@ -8354,6 +8667,7 @@ mod tests {
             select_global_mode: false,
             voice_action_enabled: false,
             opencode_unavailable: false,
+            claude_rewrite: false,
             permissions_missing: false,
             model_missing: false,
             command_model_missing: false,

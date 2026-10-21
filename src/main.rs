@@ -14,6 +14,8 @@ mod application_catalog;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod audio;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+mod cli_rewrite;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod command_grammar;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod commands;
@@ -126,6 +128,8 @@ mod personal_commands;
 mod recognition;
 #[cfg(target_os = "macos")]
 mod recording_environment;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+mod rewrite_prompt;
 #[cfg(target_os = "macos")]
 mod sparkle;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -258,6 +262,9 @@ enum Command {
         /// Preview OpenCode-dependent controls without an available installation.
         #[arg(long)]
         opencode_unavailable: bool,
+        /// Show the representative mode rewriting through the Claude CLI.
+        #[arg(long)]
+        claude_rewrite: bool,
         /// Show missing post-onboarding permissions in Settings.
         #[arg(long)]
         permissions_missing: bool,
@@ -645,6 +652,7 @@ fn main() -> Result<()> {
             select_global_mode,
             voice_action_enabled,
             opencode_unavailable,
+            claude_rewrite,
             permissions_missing,
             model_missing,
             command_model_missing,
@@ -768,6 +776,7 @@ fn main() -> Result<()> {
                     select_global_mode,
                     voice_action_enabled,
                     opencode_unavailable,
+                    claude_rewrite,
                     permissions_missing,
                     model_missing,
                     command_model_missing,

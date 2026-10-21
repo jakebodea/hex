@@ -23,6 +23,9 @@ use objc2_app_kit::NSWorkspace;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ContextSnapshot {
     pub application: Option<String>,
+    /// The foreground application's bundle identifier on macOS; stable
+    /// across interface languages, unlike the localized `application` name.
+    pub bundle_id: Option<String>,
     pub browser_url: Option<Url>,
     pub window_title: Option<String>,
     pub selected_text: Option<String>,
@@ -209,7 +212,7 @@ impl ContextSnapshot {
 
 #[cfg(target_os = "macos")]
 fn capture_macos() -> Result<ContextSnapshot> {
-    let (application, pid) = autoreleasepool(|_| {
+    let (application, bundle_id, pid) = autoreleasepool(|_| {
         let application = NSWorkspace::sharedWorkspace()
             .frontmostApplication()
             .ok_or_else(|| eyre!("macOS did not report a foreground application"))?;
@@ -217,7 +220,10 @@ fn capture_macos() -> Result<ContextSnapshot> {
             .localizedName()
             .map(|name| name.to_string())
             .ok_or_else(|| eyre!("the foreground application has no display name"))?;
-        Ok::<_, color_eyre::Report>((name, application.processIdentifier()))
+        let bundle_id = application
+            .bundleIdentifier()
+            .map(|identifier| identifier.to_string());
+        Ok::<_, color_eyre::Report>((name, bundle_id, application.processIdentifier()))
     })?;
     let browser_url = if application == "Brave Browser" {
         capture_brave_url()?
@@ -226,10 +232,22 @@ fn capture_macos() -> Result<ContextSnapshot> {
     };
     Ok(ContextSnapshot {
         application: Some(application),
+        bundle_id,
         browser_url,
         window_title: crate::accessibility::focused_window_title(pid),
         selected_text: None,
         input_revision: None,
+    })
+}
+
+/// The foreground application's localized name, as `capture` reports it.
+#[cfg(target_os = "macos")]
+pub fn frontmost_application_name() -> Option<String> {
+    autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()?
+            .localizedName()
+            .map(|name| name.to_string())
     })
 }
 

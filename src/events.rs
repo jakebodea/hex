@@ -127,6 +127,13 @@ pub struct DictationProcessing {
     pub latency_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// The rewrite provider, when one ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// CLI providers: spawn to the first structured output event, which
+    /// includes the sign-in check. The rest of `latency_ms` is the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -542,6 +549,8 @@ mod tests {
                 profile: "slack".into(),
                 latency_ms: 321,
                 fallback: Some("deadline exceeded".into()),
+                provider: Some("Claude".into()),
+                startup_ms: Some(120),
             }),
         };
 
@@ -555,6 +564,8 @@ mod tests {
                     profile,
                     latency_ms: 321,
                     fallback: Some(fallback),
+                    provider: Some(_),
+                    startup_ms: Some(120),
                 }),
                 ..
             } if profile == "slack" && fallback == "deadline exceeded"

@@ -70,6 +70,7 @@ impl PendingContext {
             .and_then(browser_url);
         WindowsContext {
             application: self.application,
+            bundle_id: None,
             browser_url,
             window_title: None,
             selected_text: None,
