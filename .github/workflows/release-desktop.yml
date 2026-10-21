@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   resolve:
+    if: github.repository == 'anomalyco/hex'
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}

@@ -1,3 +1,8 @@
+> **Jake's maintained fork of [anomalyco/hex](https://github.com/anomalyco/hex).**
+> Adds the dark waveform HUD and Codex/Claude CLI rewriting. Build this version
+> with `scripts/build-personal-app.sh --install`; see [fork maintenance](docs/fork.md).
+> Download links and Homebrew instructions below install the upstream release.
+
 <p align="center">
   <img src=".github/assets/hex-icon.png" width="96" height="96" alt="HEX app icon" />
 </p>

@@ -1,9 +1,11 @@
 # HEX Agent Guide
 
-## Private Kit Tool
+## Maintained Personal Fork
 
-Commit and push straight to `main`, no PRs. Merge any open PR without asking.
-After pushing, update the installed copy. See `~/code/control/AGENTS.md`.
+`origin` is `jakebodea/hex`; `upstream` is `anomalyco/hex` and is fetch-only.
+Commit and push to this fork's `main`, no PR required. After pushing app changes,
+update the installed copy with `scripts/build-personal-app.sh --install`.
+See [docs/fork.md](docs/fork.md) for validation, upstream merges, and local builds.
 
 ## Purpose
 

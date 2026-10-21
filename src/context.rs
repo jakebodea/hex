@@ -167,6 +167,7 @@ impl ContextSnapshot {
         {
             return Ok(Self {
                 application: Some("Brave Browser".into()),
+                bundle_id: Some(canonical_bundle_id.into()),
                 browser_url: Some(browser_url),
                 window_title,
                 selected_text: None,

@@ -1586,7 +1586,6 @@ mod tests {
                 },
                 &move || focused.map(str::to_owned),
                 &mut last_transcript,
-                &mut MeetingPasteCursor::default(),
                 None,
             );
             (event, pasted, last_transcript)
