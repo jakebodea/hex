@@ -17,6 +17,9 @@ are disabled, and the default push remote and GitHub CLI repository are the fork
 - Rewrite rules that repair misheard speech recognition, plus a per-mode
   Vocabulary list (Global applies everywhere) the rewriter prefers for names and
   jargon, so smaller local speech models stay usable.
+- Apple Speech re-enabled in the macOS model picker as the "Lowest memory"
+  choice. The installer copies permission descriptions from `app/Info.plist`
+  into the retained bundle so Speech Recognition access can be requested.
 - An Apple Development signed local installer that retains the installed app's
   resources and turns off Sparkle updates so the upstream feed cannot replace it.
 

@@ -1967,7 +1967,10 @@ mod tests {
                 .unwrap()
                 .contains(&"auto".into())
         );
-        assert!(models.iter().all(|model| model["id"] != "apple_speech"));
+        assert_eq!(
+            models.iter().any(|model| model["id"] == "apple_speech"),
+            cfg!(target_os = "macos")
+        );
         let unknown_model = request_with_method(
             document.port,
             Some(&document.token),
@@ -1979,17 +1982,21 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(response_body(&unknown_model)).unwrap()["code"],
             "unknown-model"
         );
-        let disabled_model = request_with_method(
-            document.port,
-            Some(&document.token),
-            "POST",
-            "/models/apple_speech/prepare?language=en",
-        );
-        assert!(disabled_model.starts_with("HTTP/1.1 404"));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(response_body(&disabled_model)).unwrap()["code"],
-            "unknown-model"
-        );
+        // Apple Speech exists only on macOS; elsewhere it is an unknown model.
+        if !cfg!(target_os = "macos") {
+            let disabled_model = request_with_method(
+                document.port,
+                Some(&document.token),
+                "POST",
+                "/models/apple_speech/prepare?language=en",
+            );
+            assert!(disabled_model.starts_with("HTTP/1.1 404"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(response_body(&disabled_model)).unwrap()
+                    ["code"],
+                "unknown-model"
+            );
+        }
 
         api.shutdown();
         assert!(!discovery_path.exists());
@@ -2248,11 +2255,14 @@ mod tests {
     }
 
     #[test]
-    fn model_preparation_rejects_disabled_apple_speech() {
+    fn model_preparation_accepts_apple_speech_only_on_macos() {
         let apple = crate::transcription_models::definition(
             crate::transcription_models::TranscriptionModelId::AppleSpeech,
         );
-        assert!(installation_selection(apple, "/models/apple_speech/prepare?language=de").is_err());
+        assert_eq!(
+            installation_selection(apple, "/models/apple_speech/prepare?language=de").is_ok(),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]

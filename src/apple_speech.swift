@@ -346,6 +346,13 @@ private func writeError(
     )
 }
 
+/// macOS terminates a process that touches Speech Recognition authorization
+/// without this Info.plist key, so unbundled binaries (tests, the headless
+/// CLI) must never reach `SFSpeechRecognizer`.
+private var speechRecognitionDeclared: Bool {
+    Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil
+}
+
 private func authorization() async -> SFSpeechRecognizerAuthorizationStatus {
     let status = SFSpeechRecognizer.authorizationStatus()
     guard status == .notDetermined else { return status }
@@ -360,6 +367,7 @@ private func authorization() async -> SFSpeechRecognizerAuthorizationStatus {
 public func hexAppleSpeechReady(_ identifier: UnsafePointer<CChar>?) -> Int32 {
     guard #available(macOS 26.0, *),
           SpeechTranscriber.isAvailable,
+          speechRecognitionDeclared,
           SFSpeechRecognizer.authorizationStatus() == .authorized,
           let requested = locale(identifier) else {
         return 0
@@ -386,6 +394,10 @@ public func hexAppleSpeechPrepare(
           SpeechTranscriber.isAvailable,
           let requested = locale(identifier) else {
         writeError(BridgeError("Apple Speech requires macOS 26."), to: error)
+        return nil
+    }
+    guard speechRecognitionDeclared else {
+        writeError(BridgeError("Apple Speech requires the Hex app bundle."), to: error)
         return nil
     }
     let result: Result<AppleSpeechSession, Error> = blocking(

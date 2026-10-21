@@ -2190,14 +2190,19 @@ mod tests {
     }
 
     #[test]
-    fn disabled_apple_speech_selection_migrates_to_the_default_model() {
+    fn apple_speech_selection_migrates_to_the_default_model_off_macos() {
         let mut settings: AppSettings = serde_json::from_str(
             r#"{"transcription":{"model":"apple_speech","language":"de","recognition_hints":""}}"#,
         )
         .unwrap();
+        let selected = settings.transcription.clone();
 
         settings.migrate_disabled_transcription_model();
-        assert_eq!(settings.transcription, TranscriptionSelection::default());
+        if cfg!(target_os = "macos") {
+            assert_eq!(settings.transcription, selected);
+        } else {
+            assert_eq!(settings.transcription, TranscriptionSelection::default());
+        }
     }
 
     #[test]

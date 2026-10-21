@@ -38,6 +38,18 @@ mkdir -p "$(dirname "$bundle")"
 /usr/bin/ditto "$base" "$bundle"
 cp "$root/target/release/voice-control" "$bundle/Contents/MacOS/hex"
 
+# The base app's Info.plist is kept, but permission descriptions follow the
+# source: macOS terminates an app that requests a permission it does not declare.
+info="$bundle/Contents/Info.plist"
+plutil -convert json -o - "$root/app/Info.plist" |
+  /usr/bin/python3 -c 'import json, sys
+for key, value in json.load(sys.stdin).items():
+    if key.endswith("UsageDescription"):
+        print(key + "\t" + value)' |
+  while IFS="$(printf '\t')" read -r key value; do
+    plutil -replace "$key" -string "$value" "$info"
+  done
+
 sign() {
   codesign --force --timestamp=none --options runtime --sign "$identity" "$@"
 }

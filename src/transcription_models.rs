@@ -114,6 +114,7 @@ pub enum Recommendation {
     Fastest,
     MostAccurate,
     RecognitionHints,
+    LowestMemory,
 }
 
 impl Recommendation {
@@ -123,6 +124,7 @@ impl Recommendation {
             Self::Fastest => "Fastest",
             Self::MostAccurate => "Most accurate",
             Self::RecognitionHints => "Recognition hints",
+            Self::LowestMemory => "Lowest memory",
         }
     }
 }
@@ -169,8 +171,9 @@ pub struct GgufArtifact {
 }
 
 impl ModelDefinition {
+    /// Apple Speech runs only on macOS, where the system owns the model.
     pub const fn available(&self) -> bool {
-        !matches!(self.runtime, ModelRuntime::AppleSpeech)
+        cfg!(target_os = "macos") || !matches!(self.runtime, ModelRuntime::AppleSpeech)
     }
 
     fn download_url(&self) -> Result<String> {
@@ -490,6 +493,19 @@ pub fn language_name(code: &str) -> &str {
 }
 
 pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
+    let mut choices = gguf_choices(language);
+    let apple_speech = definition(TranscriptionModelId::AppleSpeech);
+    // macOS runs Apple Speech outside Hex, so it keeps no model in memory.
+    if apple_speech.available() && apple_speech.supports_language(language) {
+        choices.push(ModelChoice {
+            model: apple_speech,
+            recommendation: Recommendation::LowestMemory,
+        });
+    }
+    choices
+}
+
+fn gguf_choices(language: &str) -> Vec<ModelChoice> {
     let choice = |id, recommendation| ModelChoice {
         model: definition(id),
         recommendation,
@@ -1164,21 +1180,26 @@ mod tests {
     }
 
     #[test]
-    fn apple_speech_is_retained_only_for_persisted_selection_migration() {
-        assert!(
-            choices_for_runtime("en")
+    fn apple_speech_is_offered_on_macos_for_explicit_languages_only() {
+        let offered = |language| {
+            choices_for_runtime(language)
                 .iter()
-                .all(|choice| choice.model.id != TranscriptionModelId::AppleSpeech)
-        );
+                .any(|choice| choice.model.id == TranscriptionModelId::AppleSpeech)
+        };
+        let macos = cfg!(target_os = "macos");
+        assert_eq!(offered("en"), macos);
+        assert_eq!(offered("de"), macos);
+        assert!(!offered(AUTO_LANGUAGE));
         let apple_speech = definition(TranscriptionModelId::AppleSpeech);
         assert!(matches!(apple_speech.runtime, ModelRuntime::AppleSpeech));
-        assert!(!apple_speech.available());
-        assert!(
+        assert_eq!(apple_speech.available(), macos);
+        assert_eq!(
             validate(&TranscriptionSelection {
                 model: TranscriptionModelId::AppleSpeech,
                 ..TranscriptionSelection::default()
             })
-            .is_err()
+            .is_ok(),
+            macos
         );
         assert_eq!(apple_speech.download_bytes(), None);
         assert!(model_path(apple_speech).is_err());

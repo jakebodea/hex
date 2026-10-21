@@ -34,6 +34,8 @@
   <string>HEX uses Input Monitoring to detect your dictation shortcuts in every app.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>HEX uses your microphone for private local dictation and does not store the captured audio.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>HEX uses on-device Apple Speech to transcribe dictation when you choose it as your speech model.</string>
   <key>SUEnableAutomaticChecks</key>
   <true/>
   <key>SUAutomaticallyUpdate</key>

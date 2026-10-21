@@ -141,7 +141,9 @@ Permissions revoked later
 ```
 
 Apple silicon, macOS 15+. Choices come from the compiled model/language catalog;
-Apple Speech is currently excluded from the desktop picker.
+On macOS, Apple Speech is offered for every explicit language as the
+"Lowest memory" choice: the system owns its model, so Hex keeps none loaded. It
+cannot stream or detect the language. Linux and Windows never offer it.
 
 ```ts
 Choose a supported language              // setup.language-conditioning; macOS + Linux picker
