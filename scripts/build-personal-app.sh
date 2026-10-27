@@ -15,6 +15,9 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 base=${HEX_BASE_APP:-/Applications/Hex.app}
 . "$root/scripts/personal-signing.sh"
+. "$root/scripts/macos-signing.sh"
+version=$(hex_version "$root")
+build_number=$(hex_build_number "$version")
 bundle="$root/target/app/Hex.app"
 installed=/Applications/Hex.app
 
@@ -31,6 +34,9 @@ if [ -z "$base_requirement" ]; then
 fi
 
 export MACOSX_DEPLOYMENT_TARGET=15.0
+# Older Rust's debug stripping creates dylibs rejected by macOS 27's loader.
+# https://github.com/rust-lang/rust/issues/157750
+export CARGO_PROFILE_RELEASE_STRIP=none
 cargo build --locked --release --manifest-path "$root/Cargo.toml"
 
 rm -rf "$bundle"
@@ -41,6 +47,8 @@ cp "$root/target/release/voice-control" "$bundle/Contents/MacOS/hex"
 # The base app's Info.plist is kept, but permission descriptions follow the
 # source: macOS terminates an app that requests a permission it does not declare.
 info="$bundle/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$version" "$info"
+plutil -replace CFBundleVersion -string "$build_number" "$info"
 plutil -convert json -o - "$root/app/Info.plist" |
   /usr/bin/python3 -c 'import json, sys
 for key, value in json.load(sys.stdin).items():

@@ -29,6 +29,7 @@ Use the same macOS deployment target for builds and checks to share the cache:
 
 ```sh
 export MACOSX_DEPLOYMENT_TARGET=15.0
+export CARGO_PROFILE_RELEASE_STRIP=none
 ./scripts/test-personal-signing.sh
 cargo fmt --check
 cargo test --locked --release --bin voice-control
@@ -50,14 +51,16 @@ for this fork. The README's public downloads still refer to upstream binaries.
 
 ## Bring in upstream fixes
 
-Start with a clean working tree on `main`. Fetch and review the incoming changes,
+Upstream's stable release branch is `production`; its default `dev` branch is
+development work, not the release channel. Start with a clean working tree on
+`main`. Fetch and review the incoming changes,
 then merge deliberately; do not reset away the personal commits:
 
 ```sh
 git switch main
 git fetch upstream
-git log --oneline main..upstream/main
-git merge upstream/main
+git log --oneline main..upstream/production
+git merge upstream/production
 ```
 
 Resolve any conflicts while preserving the personal features, run validation,
@@ -67,6 +70,17 @@ then push and reinstall:
 git push origin main
 ./scripts/build-personal-app.sh --install
 ```
+
+The personal installer stamps the app version from this checkout, rather than
+retaining the template app's version. Its bundled driver and libraries still
+come from the template; upstream changes to those components require refreshing
+them separately.
+
+Upstream's Sparkle feed installs upstream binaries, which would remove these
+personal changes. Automatic fork updates require a fork-owned build pipeline,
+signed artifacts, and a Sparkle feed and verification key configured in the
+personal app. No such feed is configured today; keep upstream updates disabled
+and merge, validate, and reinstall instead.
 
 Keep shared infrastructure and provider changes separate from personal app work.
 The inherited site-deploy, npm-release, and desktop-release jobs are restricted

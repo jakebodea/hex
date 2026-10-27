@@ -697,6 +697,11 @@ Update available                         // maintain.updates
 ├── Sidebar Update -> Sparkle update dialog
 └── Menu bar > Check for Updates -> Same dialog
 
+Personal fork                            // maintain.personal-updates
+├── Merge upstream/production -> Validate -> Build and reinstall with original signer
+├── App version -> Checkout version; template supplies driver and libraries
+└── Upstream Sparkle disabled -> Preserve personal features; no fork feed configured
+
 Remind Me Later -> Dismiss this offer -> Manual update -> Reopen the offer
 
 DisableUpdates = true at launch          // maintain.managed-updates
