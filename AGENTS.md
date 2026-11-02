@@ -7,6 +7,13 @@ Commit and push to this fork's `main`, no PR required. After pushing app changes
 update the installed copy with `scripts/build-personal-app.sh --install`.
 See [docs/fork.md](docs/fork.md) for validation, upstream merges, and local builds.
 
+## Product bar
+
+Build every app and site to the bar of Linear's website or Apple Notes: simple purpose, simple architecture, simple design, simple implementation.
+
+- Cut taglines, helper text and secondary labels. If a screen needs them to make sense, fix the layout.
+- Every decision should improve user experience (UX), developer experience (DX) and agent experience (AX) at once, without breaking anything.
+
 ## Purpose
 
 Build HEX as a local, observable macOS voice appliance with explicit Linux
